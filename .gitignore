@@ -209,3 +209,7 @@ __marimo__/
 datasets/5_us_txt/
 stock_bot_venv/
 precompute_cache/
+config/secret_key.txt/
+config/public_key.txt/
+backup.py/
+dataset/dataset.parquet/
