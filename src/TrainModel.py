@@ -9,7 +9,7 @@ from pathlib import Path
 from StockModel import StockModel
 
 
-RELOAD = True
+RELOAD = False
 
 PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min\us")
 PATH_TO_MODELS = Path(r"models")
@@ -180,7 +180,7 @@ class TrainModel:
         embed_size = self.x_id_tensor.max().item() + 1
         feature_size = len(X_FEATURE_COLUMNS)#number of features/inputs
         self.model = StockModel(feature_size=feature_size, embed_size=embed_size).to(self.device)
-        self.optim_model = torch.compile(self.model)
+        self.optim_model = torch.compile(self.model, mode="max-autotune")
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3)
         dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor)

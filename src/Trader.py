@@ -1,7 +1,7 @@
 from pathlib import Path
 from math import log
 import json
-from alpaca.data.live import StockDataStream
+from alpaca.data.live import StockDataStream, CryptoDataStream
 from alpaca.trading.client import TradingClient
 import torch
 from StockModel import StockModel
@@ -14,7 +14,7 @@ API_KEY_FILE = PATH_TO_KEYS / r"public_key.txt"
 SECRET_KEY_FILE = PATH_TO_KEYS / r"secret_key.txt"
 MODEL_NAME = r"model1_weights.pth"
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "JPM", "V", "UNH"]
+TICKERS = ["BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "BCH/USD"] # List of tickers to subscribe to
 
 
 class Trader():
@@ -38,41 +38,41 @@ class Trader():
             API_KEY = f.readline()
         with open(SECRET_KEY_FILE, "r") as f:
             SECRET_KEY = f.readline()
-        self.stream = StockDataStream(API_KEY, SECRET_KEY)
+        self.stream = CryptoDataStream(API_KEY, SECRET_KEY, url_override=r"wss://stream.data.alpaca.markets/v1beta3/crypto/us")
         self.trading_client = TradingClient(API_KEY, SECRET_KEY)
 
     
     def stream_data(self):
         # Connect to the Alpaca data stream and subscribe to the desired tickers
         print("Connecting to Alpaca data stream...")
-        self.stream.subscribe_bars(self.preprocess, *TICKERS, )
+        self.stream.subscribe_bars(self.handle_data, *TICKERS)
         print("Subscribed to tickers: ", TICKERS)
         self.stream.run()
 
 
-    def signal_generator(self, symbol, features):
-        ticker_id = self.embedding_map[symbol+".US"]
-        x_idx = torch.tensor([ticker_id], dtype=torch.long)
-        x_features = torch.tensor(features, dtype=torch.float32)
-        with torch.no_grad():
-            prediction = self.model(x_idx.to(self.device), x_features.to(self.device))
-        signal = torch.argmax(prediction).item()
-        return signal
-
-    async def preprocess(self, data):
-        print(f"Received data for {data.symbol}: open={data.open}, high={data.high}, low={data.low}, close={data.close}, volume={data.volume}")
-        ohlcv = [data.open, data.high, data.low, data.close, data.volume]
-        
+    def signal_generator(self, data):
+        signal = 2 # Default to hold
         if self.prev_close is not None:
-            norm_open = log(ohlcv[0] / ohlcv[3])  # Normalize by close price
-            norm_high = log(ohlcv[1] / ohlcv[3]) # Normalize by close price
-            norm_low = log(ohlcv[2] / ohlcv[3]) # Normalize by close price
-            norm_volume = log(ohlcv[4])
-            momentum = log(ohlcv[3] / self.prev_close) # Normalize by close price
+            norm_open = log(data.open / data.close)  # Normalize by close price
+            norm_high = log(data.high / data.close) # Normalize by close price
+            norm_low = log(data.low / data.close) # Normalize by close price
+            norm_volume = log(data.volume)
+            momentum = log(data.close / self.prev_close) # Normalize by close price
             features = [norm_open, norm_high, norm_low, norm_volume, momentum]
-            signal = self.signal_generator(data.symbol, features)
-            print(f"Signal for {data.symbol}: {signal}")
-        self.prev_close = ohlcv[3]  # Update previous close price
+
+            ticker_id = self.embedding_map[data.symbol+".US"]
+            x_idx = torch.tensor([ticker_id], dtype=torch.long)
+            x_features = torch.tensor(features, dtype=torch.float32)
+            with torch.no_grad():
+                prediction = self.model(x_idx.to(self.device), x_features.to(self.device))
+            signal = torch.argmax(prediction).item() #buy / sell / hold, 0, 1, 2 respectively
+            
+        self.prev_close = data.close # Update previous close price
+        return signal # No signal for the first data point since we don't have a previous close price
+
+    async def handle_data(self, data):
+        print(f"Received data for {data.symbol}: open={data.open}, high={data.high}, low={data.low}, close={data.close}, volume={data.volume}")
+        
             
 
 
