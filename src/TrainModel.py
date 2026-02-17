@@ -4,41 +4,40 @@ import torch
 import json
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader, random_split
-
 from pathlib import Path
 from StockModel import StockModel
 
 
-RELOAD = False
 
-PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min\us")
+# Put in config at some point
+RELOAD = True # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
+EPSILON = 2**-52 # the most tiniest didyblud
+PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = Path(r"model1_weights.pth")
+MODEL_NAME = r"model1.1_weights.pth"
+MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
+DATASET_NAME = r"us"
+# DATASET_NAME = r"5_crypto_txt"
+DATASET = PATH_TO_DATASETS/DATASET_NAME
+PARQUET = PATH_TO_DATASETS/(DATASET_NAME+r".parquet")
+EMBEDDING_LOOKUP = PATH_TO_PRECOMPUTE/(DATASET_NAME+r"_embedding_lookup.json")
+X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
+X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
+Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
 
 PATH_TO_PRECOMPUTE.mkdir(parents=True, exist_ok=True)
 PATH_TO_MODELS.mkdir(parents=True, exist_ok=True)
 PATH_TO_DATASETS.mkdir(parents=True, exist_ok=True)
 
-print(f"Path to datasets: {PATH_TO_DATASETS}")
+print(f"Loading from: {DATASET}")
 
-# SUBDIRS = [r"nasdaq etfs", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3", r"nyse etfs\1", r"nyse etfs\2", r"nyse stocks\1", r"nyse stocks\2", r"nysemkt stocks"]
 SUBDIRS = [r"nysemkt stocks",r"nyse stocks\1", r"nyse stocks\2", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3"]
+# SUBDIRS = [r"cryptocurrencies"]
 
 #hyperparams
 BATCH_SIZE = 512
 EPOCHS = 10
-# X_FEATURE_COLUMNS = ["<OPEN>", "<CLOSE>", "<HIGH>", "<LOW>", "<VOL>",
-#                     "time_sin", "time_cos", "day_sin", "day_cos",
-#                     "month_sin", "month_cos", "day_of_month_sin", "day_of_month_cos",
-#                     "start_of_quarter", "end_of_quarter", "start_of_year", "end_of_year", "quarter_of_year",
-#                     "log_volume", "return", "range", "abs_return", "momentum", "rolling_std"]
-
-#45.94%  embedding_dims = 32, hidden_layers = [1024, 512, 256] model6
-
-#%46.52  embedding_dims = 32, hidden_layers = [2048, 1024, 512] model7
-
-#%47.04  embedding_dims = 32, hidden_layers = [2048, 2048, 1024] model8
 
 X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
@@ -55,37 +54,41 @@ class TrainModel:
         self.trainloader = None
         self.criterion = None
         self.optimizer = None
-        self.dataframe = pd.DataFrame()
         self.model = None
         self.optim_model = None
+        self.dataframe = None
+
         
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
-        self.load_tensors()
-        if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None or RELOAD:
+        if not RELOAD:
+            self.load_tensors()
+        if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None:
             self.load_data()
-            print("next")
             self.preprocess_data()
-            print("next")
-            self.format_tensors(save=True)
-        print("next")
+            self.format_tensors()
         self.prep_loaders()
         print("model ready to train.")
         
 
-    def load_data(self):
+    def load_data(self):#loads all the csv files into a single dataframe, does some basic cleaning, and saves it as a parquet file for faster loading later. also checks if the parquet file already exists before doing all that to save time on subsequent runs.
         df_list = []
         total = len(SUBDIRS)
         counter = 1
-        if (PATH_TO_DATASETS/r"datasets.parquet").exists():
-            self.dataframe = pd.read_parquet(PATH_TO_DATASETS/r"datasets.parquet")
+        
+        if (PARQUET).exists():
+            print(f"parquet file found at {PARQUET}, loading parquet...")
+            self.dataframe = pd.read_parquet(PARQUET)
             return
         
-        if not PATH_TO_DATASETS.exists() or total < 1:
+        print(f"parquet file not found at {PARQUET}, loading raw data from {DATASET}...")
+        if not DATASET.exists() or total < 1:
             print("dataset not found")
             return
+
         for subdir in SUBDIRS:
-            subdir_path = PATH_TO_DATASETS/subdir #join dataset path object and subdir path object
+            subdir_path = DATASET/subdir #join dataset path object and subdir path object
+            print (f"checking for subdir at {subdir_path}...")
             if not subdir_path.exists():
                 print("subdir not found")
                 return 
@@ -96,34 +99,37 @@ class TrainModel:
                     df = pd.read_csv(file_path,sep=',', engine="pyarrow")
                     df_list.append(df)
         if not len(df_list) > 0:
-            print("no csv found or loaded")
+            print("no csvs found or loaded")
             return
+        self.dataframe = pd.DataFrame()
         self.dataframe = pd.concat(df_list, ignore_index=True)# basically, since the data is split into multiple files, we read each file and concatenate all the separate dataframes into a single dataframe ignoring their local indexes in the files.
         self.dataframe.dropna(inplace=True)
         self.dataframe.sort_values(by=["<TICKER>", "<DATE>", "<TIME>"], inplace=True) #sort it so everything is in order first by ticker, then date, then time
 
-        if not (PATH_TO_DATASETS/r"datasets.parquet").exists():
-            self.dataframe.to_parquet(PATH_TO_DATASETS/r"datasets.parquet", index=False) #save the concatenated dataframe as a parquet file for faster loading later
+        if not (PARQUET).exists():
+            self.dataframe.to_parquet(PARQUET, index=False) #save the concatenated dataframe as a parquet file for faster loading later
         print("load done.")
 
 
-    def preprocess_data(self):
+    def preprocess_data(self):#does all the feature engineering and label generation. also generates the ticker embeddings and saves the mapping to a json file for later use in the trader. this is where we do all the groupby operations since we need to do them on a per-ticker basis, so we do them all here and then just format tensors later without worrying about groupbys.
         if self.dataframe is None:
             print("no dataframe found")
             return
         print("Preprocessing data...")
         self.dataframe['<TICKER>'] = self.dataframe['<TICKER>'].astype('category')
-        if not (PATH_TO_PRECOMPUTE/r"embedding_lookup.json").exists():
+        if not (EMBEDDING_LOOKUP).exists():
             embedding_lookup = dict(enumerate(self.dataframe['<TICKER>'].cat.categories))
-            with open(PATH_TO_PRECOMPUTE/r"embedding_lookup.json", "w") as f:
+            with open(EMBEDDING_LOOKUP, "w") as f:
                 json.dump(embedding_lookup, f)
             print("embedding lookup saved.")
-
-        self.dataframe["norm_open"]=np.log(self.dataframe["<OPEN>"]/self.dataframe["<CLOSE>"])
-        self.dataframe["norm_high"]=np.log(self.dataframe["<HIGH>"]/self.dataframe["<CLOSE>"])
-        self.dataframe["norm_low"]=np.log(self.dataframe["<LOW>"]/self.dataframe["<CLOSE>"])
-        self.dataframe["log_volume"]=np.log(self.dataframe["<VOL>"])
-        self.dataframe["momentum"] = np.log(self.dataframe["<CLOSE>"]/self.dataframe.groupby('<TICKER>', sort=False, observed=False)["<CLOSE>"].shift(1)) #interbar momentum, basically the return from the previous close to the current close. this is what we will be trying to predict the direction of, so it's not included in the features.
+        
+        norm = self.dataframe.groupby('<TICKER>', sort=False, observed=False)["<CLOSE>"].shift(1)
+        self.dataframe["norm_open"]=np.log((self.dataframe["<OPEN>"]+EPSILON)/(norm+EPSILON)) 
+        self.dataframe["norm_high"]=np.log((self.dataframe["<HIGH>"]+EPSILON)/(norm+EPSILON))
+        self.dataframe["norm_low"]=np.log((self.dataframe["<LOW>"]+EPSILON)/(norm+EPSILON))
+        v_ma = self.dataframe.groupby('<TICKER>', sort=False, observed=False)['<VOL>'] .shift(1).rolling(window=20, min_periods=1).mean().reset_index(level=0, drop=True)
+        self.dataframe['log_volume'] = np.log((self.dataframe['<VOL>'] + 1) / (v_ma + 1))
+        self.dataframe["momentum"] = np.log((self.dataframe["<CLOSE>"]+EPSILON)/(norm+EPSILON)) #interbar momentum, basically the return from the previous close to the current close. this is what we will be trying to predict the direction of, so it's not included in the features.
         #ticker generation
         self.dataframe["ticker_id"] = self.dataframe["<TICKER>"].cat.codes
         #label generation
@@ -139,48 +145,56 @@ class TrainModel:
         print("preprocess done.")
 
 
-    def format_tensors(self, save = False): #does all the converting dataframe to tensor stuff. the rest of the values like feature size and embed size is in preprocess
-        if self.dataframe.empty:
+    def format_tensors(self): #does all the converting dataframe to tensor stuff. the rest of the values like feature size and embed size is in preprocess
+        if self.dataframe is None:
             print("Dataframe is empty. No data to format tensors.")
             return
         print("Formatting tensors...")
         print(self.dataframe.head())
+        print(self.dataframe[X_FEATURE_COLUMNS].max())
+        print(self.dataframe[X_FEATURE_COLUMNS].min())
         # Separate features and labels
-        y_labels = self.dataframe["label"].to_numpy(dtype=np.int64)
-        self.y_tensor = torch.from_numpy(y_labels).to(torch.int64)   
         
-        x_ids = self.dataframe["ticker_id"].to_numpy(dtype=np.int64)
-        self.x_id_tensor = torch.from_numpy(x_ids).to(torch.int64)  
+        # y_labels = self.dataframe["label"].to_numpy(dtype=np.int64)
+        # self.y_tensor = torch.from_numpy(y_labels).to(torch.int64)   
+        
+        # x_ids = self.dataframe["ticker_id"].to_numpy(dtype=np.int64)
+        # self.x_id_tensor = torch.from_numpy(x_ids).to(torch.int64)  
 
-        x_features = self.dataframe[X_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-        self.x_tensor = torch.from_numpy(x_features).to(torch.float32)  
-        if save:
-            torch.save(self.x_tensor, Path(PATH_TO_PRECOMPUTE, r"x_tensor.pt"))
-            torch.save(self.x_id_tensor, Path(PATH_TO_PRECOMPUTE,r"x_id_tensor.pt"))
-            torch.save(self.y_tensor, Path(PATH_TO_PRECOMPUTE, r"y_tensor.pt"))
-            print("saving formatted tensors.")
-        print("formatting tensors done.")
+        # x_features = self.dataframe[X_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+        # self.x_tensor = torch.from_numpy(x_features).to(torch.float32)  
+        self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
+        self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
+        self.x_tensor = torch.as_tensor(self.dataframe[X_FEATURE_COLUMNS].values, dtype=torch.float32)
+
+        print("formatting tensors done. Saving tensors...")
+        torch.save(self.x_tensor, X_TENSOR)
+        torch.save(self.x_id_tensor, X_ID_TENSOR)
+        torch.save(self.y_tensor, Y_TENSOR)
+        print("saved formatted tensors.")
+        
 
 
-    def load_tensors(self):
-        if not(Path(PATH_TO_PRECOMPUTE / r"y_tensor.pt").exists() and Path(PATH_TO_PRECOMPUTE/ "x_tensor.pt").exists() and Path(PATH_TO_PRECOMPUTE , r"x_id_tensor.pt").exists()):
+    def load_tensors(self):#loads the preformatted tensors if they exist to save time on subsequent runs. if they don't exist, it will load the data and preprocess it and format the tensors and save them for next time.
+        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists()):
             print("no saved tensors found")
             return
-        self.y_tensor = torch.load(PATH_TO_PRECOMPUTE / r"y_tensor.pt")
-        self.x_tensor = torch.load(PATH_TO_PRECOMPUTE / r"x_tensor.pt")
-        self.x_id_tensor = torch.load(PATH_TO_PRECOMPUTE / r"x_id_tensor.pt")
+        self.y_tensor = torch.load(Y_TENSOR)
+        self.x_tensor = torch.load(X_TENSOR)
+        self.x_id_tensor = torch.load(X_ID_TENSOR)
         print("saved tensors loaded successfully.")
 
 
-    def prep_loaders(self):
+    def prep_loaders(self):# prepares the data loaders and model for training. it also sets up the loss function and optimizer. we do this in a separate function so that we can easily reload the model and just prepare the loaders without having to reload and preprocess the data again if we want to continue training or evaluate.
         if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None:
             print("Tensors are not properly initialized. Cannot train model.")
             return
         print("Preparing data loaders and model...")
+        
         embed_size = self.x_id_tensor.max().item() + 1
         feature_size = len(X_FEATURE_COLUMNS)#number of features/inputs
         self.model = StockModel(feature_size=feature_size, embed_size=embed_size).to(self.device)
-        self.optim_model = torch.compile(self.model, mode="max-autotune")
+        self.optim_model = torch.compile(self.model, mode="default") 
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3)
         dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor)
@@ -192,7 +206,7 @@ class TrainModel:
         self.testloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
 
 
-    def training_loop(self):
+    def training_loop(self):# trains the model using the prepared data loaders and model. it also saves the model state dict after training is complete.
         if self.criterion is None or self.optimizer is None or self.trainloader is None or self.optim_model is None:
             print("Data loaders or model not properly initialized. Cannot train model.")
             return
@@ -205,19 +219,20 @@ class TrainModel:
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device,non_blocking=True)
                 y_batch = y_batch.to(self.device,non_blocking=True)
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 outputs = self.optim_model(x_id_batch, x_batch)
                 loss = self.criterion(outputs, y_batch)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 total_loss+=loss.item()
                 counter+=1
             print(f"loss for epoch {epoch} / {EPOCHS}: {(total_loss/counter):.4f}")
-        torch.save(self.model.state_dict(), PATH_TO_MODELS / MODEL_NAME)
+        torch.save(self.model.state_dict(), MODEL_PATH)
         print("training complete. Model saved.")
 
 
-    def evaluate(self):
+    def evaluate(self):# evaluates the model on the test set and prints the accuracy. we do this in a separate function so that we can easily reload the model and just evaluate without having to reload and preprocess the data again if we want to continue training or evaluate.
         if self.testloader is None or self.optim_model is None:
             print("Test loader not properly initialized. Cannot evaluate model.")
             return
@@ -240,19 +255,19 @@ class TrainModel:
             print(f'Accuracy of the model on the test data: {correct} correct predictions out of {total} total samples; {100 * correct / total:.2f}%')  
 
 
-    def load_model(self):
-        if not (PATH_TO_MODELS/MODEL_NAME).exists():
+    def load_model(self):# loads the model state dict from the saved file. we do this in a separate function so that we can easily reload the model and just prepare the loaders without having to reload and preprocess the data again if we want to continue training or evaluate.
+        if not (MODEL_PATH).exists():
             print("model state dicts could not be loaded.")
             return
-        state_dict = torch.load(PATH_TO_MODELS/MODEL_NAME)
+        state_dict = torch.load(MODEL_PATH)
         self.model.load_state_dict(state_dict)
         print("model state dicts loaded.")
 
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    # stock_model.training_loop()
+    stock_model.training_loop()
     # stock_model.load_model()
-    # stock_model.evaluate()
+    stock_model.evaluate()
     
 

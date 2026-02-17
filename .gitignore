@@ -213,3 +213,5 @@ config/public_key.txt
 config/secret_key.txt
 datasets/dataset.parquet
 src/backup.py
+datasets/5_crypto_txt.parquet
+datasets/5_crypto_txt/

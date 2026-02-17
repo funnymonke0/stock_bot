@@ -6,7 +6,6 @@ from alpaca.trading.client import TradingClient
 import torch
 from StockModel import StockModel
 
-PATH_TO_DATASETS = r"datasets\5_us_txt\data\5 min\us"
 
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_KEYS = Path(r"config")
