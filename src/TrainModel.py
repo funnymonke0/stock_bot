@@ -12,19 +12,21 @@ from StockModel import StockModel
 # Put in config at some point
 RELOAD = True # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
 EPSILON = 2**-52 # the most tiniest didyblud
-PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min")
+# PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min")
+PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"model1.1_weights.pth"
+MODEL_NAME = r"crypto_model1.1_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
-DATASET_NAME = r"us"
-# DATASET_NAME = r"5_crypto_txt"
+# DATASET_NAME = r"us"
+DATASET_NAME = r"5_crypto_txt"
 DATASET = PATH_TO_DATASETS/DATASET_NAME
 PARQUET = PATH_TO_DATASETS/(DATASET_NAME+r".parquet")
 EMBEDDING_LOOKUP = PATH_TO_PRECOMPUTE/(DATASET_NAME+r"_embedding_lookup.json")
 X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
 X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
 Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
+CLASS_WEIGHTS_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_class_weights_tensor.pt")
 
 PATH_TO_PRECOMPUTE.mkdir(parents=True, exist_ok=True)
 PATH_TO_MODELS.mkdir(parents=True, exist_ok=True)
@@ -32,8 +34,8 @@ PATH_TO_DATASETS.mkdir(parents=True, exist_ok=True)
 
 print(f"Loading from: {DATASET}")
 
-SUBDIRS = [r"nysemkt stocks",r"nyse stocks\1", r"nyse stocks\2", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3"]
-# SUBDIRS = [r"cryptocurrencies"]
+# SUBDIRS = [r"nysemkt stocks",r"nyse stocks\1", r"nyse stocks\2", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3"]
+SUBDIRS = [r"cryptocurrencies"]
 
 #hyperparams
 BATCH_SIZE = 512
@@ -54,6 +56,7 @@ class TrainModel:
         self.trainloader = None
         self.criterion = None
         self.optimizer = None
+        self.class_weights = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32) # default to no class weighting, can be tuned based on label distribution in preprocess_data
         self.model = None
         self.optim_model = None
         self.dataframe = None
@@ -66,7 +69,6 @@ class TrainModel:
         if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None:
             self.load_data()
             self.preprocess_data()
-            self.format_tensors()
         self.prep_loaders()
         print("model ready to train.")
         
@@ -139,49 +141,30 @@ class TrainModel:
             [future_return > thresh, future_return < -thresh],
             [0, 1],
             default=2
-        ) #buy / sell / hold, 0, 1, 2 
+        ) #buy / sell / hold, 0, 1, 2
         self.dataframe.dropna(inplace=True)
-        self.dataframe = self.dataframe[["ticker_id"]+X_FEATURE_COLUMNS+["label"]] #we just pass all the relevant fields (ticker id, features, and labels) in 1 dataframe to parse later in format_tensors
-        print("preprocess done.")
-
-
-    def format_tensors(self): #does all the converting dataframe to tensor stuff. the rest of the values like feature size and embed size is in preprocess
-        if self.dataframe is None:
-            print("Dataframe is empty. No data to format tensors.")
-            return
-        print("Formatting tensors...")
-        print(self.dataframe.head())
-        print(self.dataframe[X_FEATURE_COLUMNS].max())
-        print(self.dataframe[X_FEATURE_COLUMNS].min())
-        # Separate features and labels
-        
-        # y_labels = self.dataframe["label"].to_numpy(dtype=np.int64)
-        # self.y_tensor = torch.from_numpy(y_labels).to(torch.int64)   
-        
-        # x_ids = self.dataframe["ticker_id"].to_numpy(dtype=np.int64)
-        # self.x_id_tensor = torch.from_numpy(x_ids).to(torch.int64)  
-
-        # x_features = self.dataframe[X_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-        # self.x_tensor = torch.from_numpy(x_features).to(torch.float32)  
+        counts = self.dataframe["label"].value_counts().sort_index()
+        print(f"Label distribution:\n{counts}")
+        raw_weights =[counts.sum()/counts[i] for i in range(3)]
+        mean_weight = sum(raw_weights) / len(raw_weights)
+        self.class_weights = torch.tensor([raw_weights[i]/mean_weight for i in range(3)], dtype=torch.float32)
         self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
         self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
         self.x_tensor = torch.as_tensor(self.dataframe[X_FEATURE_COLUMNS].values, dtype=torch.float32)
-
-        print("formatting tensors done. Saving tensors...")
         torch.save(self.x_tensor, X_TENSOR)
         torch.save(self.x_id_tensor, X_ID_TENSOR)
         torch.save(self.y_tensor, Y_TENSOR)
-        print("saved formatted tensors.")
-        
-
+        torch.save(self.class_weights, CLASS_WEIGHTS_TENSOR)
+        print("preprocess done. Tensors saved for future use.")
 
     def load_tensors(self):#loads the preformatted tensors if they exist to save time on subsequent runs. if they don't exist, it will load the data and preprocess it and format the tensors and save them for next time.
-        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists()):
+        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists() and Path(CLASS_WEIGHTS_TENSOR).exists()):
             print("no saved tensors found")
             return
         self.y_tensor = torch.load(Y_TENSOR)
         self.x_tensor = torch.load(X_TENSOR)
         self.x_id_tensor = torch.load(X_ID_TENSOR)
+        self.class_weights = torch.load(CLASS_WEIGHTS_TENSOR)
         print("saved tensors loaded successfully.")
 
 
@@ -195,9 +178,11 @@ class TrainModel:
         feature_size = len(X_FEATURE_COLUMNS)#number of features/inputs
         self.model = StockModel(feature_size=feature_size, embed_size=embed_size).to(self.device)
         self.optim_model = torch.compile(self.model, mode="default") 
-        self.criterion = nn.CrossEntropyLoss()
+        self.class_weights = self.class_weights.to(self.device)
+        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3)
         dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor)
+        
         train_size = int(0.8 * len(dataset))
         test_size = len(dataset) - train_size
         train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
