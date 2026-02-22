@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import json
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from pathlib import Path
 from StockModel import StockModel
@@ -16,7 +17,7 @@ EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model1.2_weights.pth"
+MODEL_NAME = r"crypto_model1.3_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 # DATASET_NAME = r"us"
 DATASET_NAME = r"5_crypto_txt"
@@ -26,7 +27,7 @@ EMBEDDING_LOOKUP = PATH_TO_PRECOMPUTE/(DATASET_NAME+r"_embedding_lookup.json")
 X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
 X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
 Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
-CLASS_WEIGHTS_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_class_weights_tensor.pt")
+WEIGHTS_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_weights_tensor.pt")
 
 PATH_TO_PRECOMPUTE.mkdir(parents=True, exist_ok=True)
 PATH_TO_MODELS.mkdir(parents=True, exist_ok=True)
@@ -50,9 +51,10 @@ SELL_THRESH = 0.001 #threshold for sell signals, can be tuned as a hyperparamete
 # OPEN = 9*60 + 30
 # CLOSE = 16*60
 
-#1.1 embedding_dims = 32, hidden_layers = [2048, 2048, 1024]
-#1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024]
-#1.3 embedding_dims = 8, hidden_layers = [64, 32]
+#1.1 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
+#1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
+#1.3 embedding_dims = 32, hidden_layers = [2048, 2048, 1024], sigmoid now
+#1.4 embedding_dims = 8, hidden_layers = [64, 32],
 
 class TrainModel:
     def __init__(self):
@@ -61,9 +63,8 @@ class TrainModel:
         self.y_tensor = None
         self.testloader = None
         self.trainloader = None
-        self.criterion = None
         self.optimizer = None
-        self.class_weights = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32) # default to no class weighting, can be tuned based on label distribution in preprocess_data
+        self.weights_tensor = None
         self.model = None
         self.optim_model = None
         self.dataframe = None
@@ -142,36 +143,45 @@ class TrainModel:
         #ticker generation
         self.dataframe["ticker_id"] = self.dataframe["<TICKER>"].cat.codes
         #label generation
-        future_return = self.dataframe.groupby("<TICKER>")["momentum"].shift(-1) #shift the momentum; if the previous close was lower than the current close, the PREVIOUS entry was a buy.
+        future_return = self.dataframe.groupby("<TICKER>",sort=False, observed=False)["momentum"].shift(-1) #shift the momentum; if the previous close was lower than the current close, the PREVIOUS entry was a buy.
         self.dataframe["label"] = np.select(
             [future_return > BUY_THRESH, future_return < SELL_THRESH], #we not short selling with an automated bot bruh you crazy
-            [0, 1],
-            default=2
-        ) #buy / sell / hold, 0, 1, 2
+            [1.0, 0.0],
+            default=0.5
+        ) #buy / sell / hold, 1, 0, 0.5. updated for sigmoid activation
+        print(self.dataframe["label"].iloc[0])
         self.dataframe.dropna(inplace=True)
         counts = self.dataframe["label"].value_counts().sort_index()
         print(f"Label distribution:\n{counts}")
-        raw_weights =[counts.sum()/counts[i] for i in range(3)]
+        #i dont fully understand but basically this accounts for imbalances in data by weighting each output differently (so if there are a bunch of sell signals, it wont just spam sell and get like 100% accuracy but no actual learning)
+        total = counts.sum()
+        raw_weights ={i:total/counts[i] for i in [0, 0.5, 1]}
         mean_weight = sum(raw_weights) / len(raw_weights)
-        print(self.dataframe.iloc)
-        self.class_weights = torch.tensor([raw_weights[i]/mean_weight for i in range(3)], dtype=torch.float32)
-        self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
+        weight_map = {i:raw_weights[i]/mean_weight for i in [0, 0.5, 1]}
+
+        cweights = np.zeros_like(self.dataframe["label"].values, dtype=np.float32)
+        cweights[self.dataframe["label"]==0.0] = weight_map[0]
+        cweights[self.dataframe["label"]==0.5] = weight_map[0.5]
+        cweights[self.dataframe["label"]==1.0] = weight_map[1]
+        self.weights_tensor = torch.as_tensor(cweights, dtype=torch.float32)
+        print(self.weights_tensor.shape)
+        self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.float32)
         self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
         self.x_tensor = torch.as_tensor(self.dataframe[X_FEATURE_COLUMNS].values, dtype=torch.float32)
         torch.save(self.x_tensor, X_TENSOR)
         torch.save(self.x_id_tensor, X_ID_TENSOR)
         torch.save(self.y_tensor, Y_TENSOR)
-        torch.save(self.class_weights, CLASS_WEIGHTS_TENSOR)
+        torch.save(self.weights_tensor, WEIGHTS_TENSOR)
         print("preprocess done. Tensors saved for future use.")
 
     def load_tensors(self):#loads the preformatted tensors if they exist to save time on subsequent runs. if they don't exist, it will load the data and preprocess it and format the tensors and save them for next time.
-        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists() and Path(CLASS_WEIGHTS_TENSOR).exists()):
+        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists() and Path(WEIGHTS_TENSOR).exists()):
             print("no saved tensors found")
             return
         self.y_tensor = torch.load(Y_TENSOR)
         self.x_tensor = torch.load(X_TENSOR)
         self.x_id_tensor = torch.load(X_ID_TENSOR)
-        self.class_weights = torch.load(CLASS_WEIGHTS_TENSOR)
+        self.weights_tensor = torch.load(WEIGHTS_TENSOR)
         print("saved tensors loaded successfully.")
 
 
@@ -184,12 +194,13 @@ class TrainModel:
         embed_size = self.x_id_tensor.max().item() + 1
         feature_size = len(X_FEATURE_COLUMNS)#number of features/inputs
         self.model = StockModel(feature_size=feature_size, embed_size=embed_size).to(self.device)
-        self.optim_model = torch.compile(self.model, mode="default") 
-        self.class_weights = self.class_weights.to(self.device)
-        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        self.optim_model = torch.compile(self.model, mode="default")
+        self.weights_tensor.to(self.device)
+        # self.criterion = nn.CrossEntropyLoss(weight=self.weights_tensor)
+
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3)
-        dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor)
-        
+        dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor, self.weights_tensor)
+
         train_size = int(0.8 * len(dataset))
         test_size = len(dataset) - train_size
         train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
@@ -199,7 +210,7 @@ class TrainModel:
 
 
     def training_loop(self):# trains the model using the prepared data loaders and model. it also saves the model state dict after training is complete.
-        if self.criterion is None or self.optimizer is None or self.trainloader is None or self.optim_model is None:
+        if self.optimizer is None or self.trainloader is None or self.optim_model is None:
             print("Data loaders or model not properly initialized. Cannot train model.")
             return
         print("training model...")
@@ -207,13 +218,15 @@ class TrainModel:
         for epoch in range(EPOCHS):
             total_loss = 0.0
             counter = 1
-            for x_id_batch, x_batch, y_batch in self.trainloader:
+            for x_id_batch, x_batch, y_batch, w_batch in self.trainloader:
+                
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device,non_blocking=True)
                 y_batch = y_batch.to(self.device,non_blocking=True)
+                w_batch = w_batch.to(self.device, non_blocking = True)
                 self.optimizer.zero_grad(set_to_none=True)
                 outputs = self.optim_model(x_id_batch, x_batch)
-                loss = self.criterion(outputs, y_batch)
+                loss = F.binary_cross_entropy(outputs, y_batch.view_as(outputs), w_batch.view_as(outputs))
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
@@ -233,7 +246,7 @@ class TrainModel:
         correct = 0
         total = 0
         with torch.no_grad():
-            for x_id_batch, x_batch, y_batch in self.testloader:
+            for x_id_batch, x_batch, y_batch, w_batch in self.testloader:
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device, non_blocking=True)
                 y_batch = y_batch.to(self.device, non_blocking=True)
@@ -255,11 +268,12 @@ class TrainModel:
         self.model.load_state_dict(state_dict)
         print("model state dicts loaded.")
 
+
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    stock_model.training_loop()
-    # stock_model.load_model()
+    # stock_model.training_loop()
+    stock_model.load_model()
     stock_model.evaluate()
     
 
