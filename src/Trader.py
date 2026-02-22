@@ -2,17 +2,21 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import json
-from alpaca.data.live import StockDataStream, CryptoDataStream
-from alpaca.trading.client import TradingClient
+
 import torch
 from StockModel import StockModel
+
+from alpaca.data.live import StockDataStream, CryptoDataStream
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 
 EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_KEYS = Path(r"config")
 API_KEY_FILE = PATH_TO_KEYS / r"public_key.txt"
 SECRET_KEY_FILE = PATH_TO_KEYS / r"secret_key.txt"
-MODEL_NAME = r"crypto_model1.1_weights.pth"
+MODEL_NAME = r"crypto_model1.2_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
 PATH_TO_DATASETS = Path(r"datasets")
@@ -22,7 +26,7 @@ X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
 X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
 Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
 
-TICKERS = ["BTC", "ETH", "XMR"] # List of tickers to subscribe to
+TICKERS = ["BTC", "ETH", "BCH", "LTC", "UNI", "SOL", "AVAX", "XRP", "DOGE", "USDC", "USDT","BCH","AAVE", "DOT", "LINK", "CRV", "XTZ", "YFI"] # List of tickers to subscribe to
 X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
 
@@ -49,7 +53,9 @@ class Trader():
         with open(SECRET_KEY_FILE, "r") as f:
             SECRET_KEY = f.readline()
         self.stream = CryptoDataStream(API_KEY, SECRET_KEY, url_override=r"wss://stream.data.alpaca.markets/v1beta3/crypto/us")
-        
+        self.client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+        self.account = self.client.get_account()
+        print(f"Initialized trader with account status: {self.account.crypto_status}")
 
     
     def stream_data(self):
@@ -70,9 +76,11 @@ class Trader():
     
     def process(self, data):
         new_row = pd.DataFrame([data.__dict__])
-        self.bars_window = pd.concat([self.bars_window, new_row]).sort_values(['symbol', 'timestamp']).dropna(inplace=False).iloc[-(100*len(TICKERS)):] 
-        print(f"Updated bars window:\n{self.bars_window}")
+        self.bars_window = pd.concat([self.bars_window, new_row]).sort_values(['symbol', 'timestamp']).dropna(inplace=False).iloc[-(50*len(TICKERS)):] 
         self.bars_window['symbol'] = self.bars_window['symbol'].astype('category')
+        if data.symbol not in self.bars_window['symbol'].cat.categories:
+            print(f"Symbol {data.symbol} not in bars window categories yet. Skipping processing for this data point.")
+            return None, None
         symbol_group = self.bars_window.groupby('symbol', sort=False, observed=False).get_group(data.symbol) # Get the group of rows corresponding to the symbol of the incoming data point
         
         #for each symbol...
@@ -90,27 +98,75 @@ class Trader():
         ticker_id = torch.as_tensor(self.embedding_map[data.symbol], dtype=torch.int64).unsqueeze(0) # Get the ticker ID from the embedding map and add a batch dimension
         features = torch.as_tensor([norm_open, norm_high, norm_low, log_volume, momentum], dtype=torch.float32).unsqueeze(0) # Create a tensor of features and add a batch dimension
         return ticker_id, features
-
-        
+     
     async def handle_data(self, data):
         print(f"data received: {data}")
         data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
         ticker_id, features = self.process(data)
         if ticker_id is not None and features is not None:
-            print(f"Ticker ID: {ticker_id}, Features: {features}")
+            # print(f"Ticker ID: {ticker_id}, Features: {features}")
             signal = self.signal_generator(ticker_id=ticker_id, features=features)
             print(f"Generated signal: {signal}")
             with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
                 f.write(f"{data.timestamp}: {data.symbol} - Signal: {signal}\n")
+            order = self.portfolio_management(signal, data)
+            if order is not None:
+                try:
+                    self.client.submit_order(order)
+                    print(f"Order submitted: {order}")
+                except Exception as e:
+                    print(f"Error submitting order: {e}")
         else:
-            print("Not enough data to generate features and signal yet.")
+            # print("Not enough data to generate features and signal yet.")
+            pass
 
+    def portfolio_management(self, signal, data):
+        buying_power = float(self.account.buying_power)*0.99
+        limit = max(0.001 * buying_power, 10.00)
+        symbol = data.symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
+        asset = self.client.get_asset(symbol) # Check if the asset is tradable
+        if not asset.tradable:
+            print(f"Asset {symbol} is not tradable.")
+            return
+        # limit_price = (data.close+0.03 if signal == 0 else data.close*(1-0.05/100)) # Set limit price slightly above current price for buy orders and slightly below for sell orders to increase chances of execution
+        price = data.close
+        if not asset.fractionable:
+            qty = min(int(limit // price), int(buying_power//price))
+        else:
+            qty = min(limit/price, buying_power/price) # Calculate the quantity to buy/sell based on
+            
 
+        order = None
+        if signal == 0: # Buy signal (limit order placed slightly above current price)
+            if buying_power > price * qty:
+                # print(f"Placing buy order for {symbol} at limit price {limit_price} with quantity {qty}")
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
+                )
+        elif signal == 1: # Sell signal
+
+            if symbol in self.client.get_all_positions():
+                # print(f"Placing sell order for {symbol} at limit price {limit_price} with quantity {qty}")
+                qty = min(self.client.get_open_position(symbol).qty, qty)
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
+                )
+        else: # Hold signal
+            # print(f"Holding position in {symbol}. No order placed.")
+            pass
+
+        return order
+            
         
             
 
 
 if __name__ == "__main__":
     trader = Trader()
-
     trader.stream_data()

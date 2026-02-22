@@ -215,3 +215,4 @@ datasets/dataset.parquet
 src/backup.py
 datasets/5_crypto_txt.parquet
 datasets/5_crypto_txt/
+src/test_trade.py

@@ -16,7 +16,7 @@ EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model1.1_weights.pth"
+MODEL_NAME = r"crypto_model1.2_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 # DATASET_NAME = r"us"
 DATASET_NAME = r"5_crypto_txt"
@@ -43,9 +43,16 @@ EPOCHS = 10
 
 X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
+BUY_THRESH = 0.005 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
+SELL_THRESH = 0.001 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than -0.1%, otherwise hold.
+
 # time normalization constants
-OPEN = 9*60 + 30
-CLOSE = 16*60
+# OPEN = 9*60 + 30
+# CLOSE = 16*60
+
+#1.1 embedding_dims = 32, hidden_layers = [2048, 2048, 1024]
+#1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024]
+#1.3 embedding_dims = 8, hidden_layers = [64, 32]
 
 class TrainModel:
     def __init__(self):
@@ -136,9 +143,8 @@ class TrainModel:
         self.dataframe["ticker_id"] = self.dataframe["<TICKER>"].cat.codes
         #label generation
         future_return = self.dataframe.groupby("<TICKER>")["momentum"].shift(-1) #shift the momentum; if the previous close was lower than the current close, the PREVIOUS entry was a buy.
-        thresh = 0.001 #threshold for buy/sell signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.1% and sell if it's less than -0.1%, otherwise hold.
         self.dataframe["label"] = np.select(
-            [future_return > thresh, future_return < -thresh],
+            [future_return > BUY_THRESH, future_return < SELL_THRESH], #we not short selling with an automated bot bruh you crazy
             [0, 1],
             default=2
         ) #buy / sell / hold, 0, 1, 2
@@ -147,6 +153,7 @@ class TrainModel:
         print(f"Label distribution:\n{counts}")
         raw_weights =[counts.sum()/counts[i] for i in range(3)]
         mean_weight = sum(raw_weights) / len(raw_weights)
+        print(self.dataframe.iloc)
         self.class_weights = torch.tensor([raw_weights[i]/mean_weight for i in range(3)], dtype=torch.float32)
         self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
         self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
