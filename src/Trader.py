@@ -32,7 +32,7 @@ X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "moment
 
 class Trader():
     def __init__(self):
-        self.bid_ask_map = {ticker+"/USD":[0,0] for ticker in TICKERS}
+        self.bid_ask_map = {ticker+"/USD":[-1,-1] for ticker in TICKERS}
         self.embedding_map = {}
         self.bars_window = pd.DataFrame() # Initialize an empty DataFrame to store incoming bars data
         with open(EMBEDDING_LOOKUP, 'r') as f:
@@ -105,19 +105,20 @@ class Trader():
     
     async def handle_quote(self, data):
         self.bid_ask_map[data.symbol] = [data.bid_price, data.ask_price]
-        print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
+        # print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
+        # print(self.bid_ask_map)
 
     async def handle_data(self, data):
-        print(f"data received: {data}")
+        # print(f"data received: {data}")
         data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
         ticker_id, features = self.process(data)
         if ticker_id is not None and features is not None:
             # print(f"Ticker ID: {ticker_id}, Features: {features}")
             signal = self.signal_generator(ticker_id=ticker_id, features=features)
-            print(f"Generated signal: {signal}")
+            print(f"Generated signal: {signal} for data {data}")
             with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
                 f.write(f"{data.timestamp}: {data.symbol} - Signal: {signal}\n")
-            order = self.portfolio_management(signal, data)
+            order = self.portfolio_management(signal, data.symbol)
             if order is not None:
                 try:
                     self.client.submit_order(order)
@@ -128,21 +129,22 @@ class Trader():
             # print("Not enough data to generate features and signal yet.")
             pass
 
-    def portfolio_management(self, signal, data):
+    def portfolio_management(self, signal, symbol):
 
-        symbol = data.symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
+        symbol = symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
+        print("test1")
         asset = self.client.get_asset(symbol) # Check if the asset is tradable
         if not asset.tradable:
             print(f"Asset {symbol} is not tradable.")
             return
         ask, bid = self.bid_ask_map[symbol]
-        if ask == 0 or bid ==0:
+        if ask == -1 or bid ==-1:
             print(f"need to get quote data for {symbol}")
             return
-        
+        print("test2")
         buying_power = float(self.account.buying_power)*0.99
         limit = 0.05 * buying_power # per trade limit
-        direction = signal[0]-signal[1]
+        direction = signal[0]-signal[2]
         qty = lambda limit_price: min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if not asset.fractionable else min(limit*abs(direction)/limit_price, buying_power/limit_price)
 
         order = None
