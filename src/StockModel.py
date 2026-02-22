@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class StockModel(nn.Module):
-    def __init__(self, feature_size, embed_size, embedding_dims = 32, hidden_layers = [2048, 2048, 1024], dropout=0.3, output_size=1):
+    def __init__(self, feature_size, embed_size, embedding_dims = 8, hidden_layers = [64, 32], dropout=0.3, output_size=3):
         super(StockModel, self).__init__()
 
         self.ticker_embedding = nn.Embedding(num_embeddings=embed_size, embedding_dim=embedding_dims)
@@ -16,7 +16,7 @@ class StockModel(nn.Module):
             self.sequential_layers.append(nn.Dropout(dropout))
             next_size = hidden_size
         self.sequential_layers.append(nn.Linear(next_size, output_size))
-        self.sequential_layers.append(nn.Sigmoid())
+        # self.sequential_layers.append(nn.Sigmoid())
         self.model = nn.Sequential(*self.sequential_layers)
 
     def forward(self, x_id, x_features):
