@@ -16,7 +16,7 @@ PATH_TO_MODELS = Path(r"models")
 PATH_TO_KEYS = Path(r"config")
 API_KEY_FILE = PATH_TO_KEYS / r"public_key.txt"
 SECRET_KEY_FILE = PATH_TO_KEYS / r"secret_key.txt"
-MODEL_NAME = r"crypto_model1.2_weights.pth"
+MODEL_NAME = r"crypto_model1.3_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
 PATH_TO_DATASETS = Path(r"datasets")
@@ -68,7 +68,7 @@ class Trader():
 
 
     def signal_generator(self, ticker_id:torch.Tensor, features:torch.Tensor):
-        signal = 2 # Default to hold
+        signal = 0 # Default to hold
         with torch.no_grad():
             prediction = self.model(ticker_id.to(self.device), features.to(self.device))
         signal = torch.argmax(prediction, dim=1).item() #buy / sell / hold, 0, 1, 2 respectively
@@ -122,7 +122,7 @@ class Trader():
 
     def portfolio_management(self, signal, data):
         buying_power = float(self.account.buying_power)*0.99
-        limit = max(0.001 * buying_power, 10.00)
+        limit = max(0.05 * buying_power * abs(signal), 10.00)
         symbol = data.symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
         asset = self.client.get_asset(symbol) # Check if the asset is tradable
         if not asset.tradable:
@@ -137,19 +137,19 @@ class Trader():
             
 
         order = None
-        if signal == 0: # Buy signal (limit order placed slightly above current price)
+        if signal > 0: # Buy signal (limit order placed slightly above current price)
             if buying_power > price * qty:
-                # print(f"Placing buy order for {symbol} at limit price {limit_price} with quantity {qty}")
+                print(f"Placing buy order for {symbol} at limit price {data.close} with quantity {qty}")
                 order = MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
                 )
-        elif signal == 1: # Sell signal
+        elif signal < 0: # Sell signal
 
             if symbol in self.client.get_all_positions():
-                # print(f"Placing sell order for {symbol} at limit price {limit_price} with quantity {qty}")
+                print(f"Placing sell order for {symbol} at limit price {data.close} with quantity {qty}")
                 qty = min(self.client.get_open_position(symbol).qty, qty)
                 order = MarketOrderRequest(
                     symbol=symbol,
@@ -158,7 +158,7 @@ class Trader():
                     time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
                 )
         else: # Hold signal
-            # print(f"Holding position in {symbol}. No order placed.")
+            print(f"Holding position in {symbol}. No order placed.")
             pass
 
         return order
