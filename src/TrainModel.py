@@ -16,7 +16,7 @@ EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model1.8_weights.pth"
+MODEL_NAME = r"crypto_model1.6_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 # DATASET_NAME = r"us"
 DATASET_NAME = r"5_crypto_txt"
@@ -53,11 +53,9 @@ SELL_THRESH = 0.001 #threshold for sell signals, can be tuned as a hyperparamete
 #1.1 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
 #1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
 #1.3 embedding_dims = 32, hidden_layers = [2048, 2048, 1024], sigmoid now
-#1.4 embedding_dims = 8, hidden_layers = [64, 32],  
+#1.4 embedding_dims = 8, hidden_layers = [64, 32],  sigmoid bad
 #1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy 
-#1.6 embedding_dims = 8, hidden_layers = [128, 64],
-#1.7 embedding_dims = 8, hidden_layers = [256, 128], got much worse
-#1.8 embedding_dims = 32, hidden_layers = [128, 64],
+#1.6 embedding_dims = 8, hidden_layers = [128, 64], around same
 
 
 
@@ -271,8 +269,8 @@ class TrainModel:
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    stock_model.training_loop()
-    # stock_model.load_model()
+    # stock_model.training_loop()
+    stock_model.load_model()
     stock_model.evaluate()
     
 

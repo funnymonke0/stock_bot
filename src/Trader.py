@@ -33,6 +33,7 @@ X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "moment
 class Trader():
     def __init__(self):
         self.bid_ask_map = {ticker+"/USD":[-1,-1] for ticker in TICKERS}
+        
         self.embedding_map = {}
         self.bars_window = pd.DataFrame() # Initialize an empty DataFrame to store incoming bars data
         with open(EMBEDDING_LOOKUP, 'r') as f:
@@ -56,6 +57,10 @@ class Trader():
         self.stream = CryptoDataStream(API_KEY, SECRET_KEY, url_override=r"wss://stream.data.alpaca.markets/v1beta3/crypto/us")
         self.client = TradingClient(API_KEY, SECRET_KEY, paper=True)
         self.account = self.client.get_account()
+        self.cached_buying_power = float(self.account.buying_power)
+        asset_map = {ticker:self.client.get_asset(ticker+"/USD") for ticker in TICKERS}
+        self.tradable = [ticker+"/USD" if asset_map[ticker].tradable else "" for ticker in TICKERS]
+        self.frac = [ticker+"/USD" if asset_map[ticker].fractionable else "" for ticker in TICKERS]
         print(f"Initialized trader with account status: {self.account.crypto_status}")
 
     
@@ -105,11 +110,11 @@ class Trader():
     
     async def handle_quote(self, data):
         self.bid_ask_map[data.symbol] = [data.bid_price, data.ask_price]
-        # print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
+        print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
         # print(self.bid_ask_map)
 
     async def handle_data(self, data):
-        # print(f"data received: {data}")
+        print(f"data received: {data}")
         data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
         ticker_id, features = self.process(data)
         if ticker_id is not None and features is not None:
@@ -132,25 +137,22 @@ class Trader():
     def portfolio_management(self, signal, symbol):
 
         symbol = symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
-        print("test1")
-        asset = self.client.get_asset(symbol) # Check if the asset is tradable
-        if not asset.tradable:
+
+
+        if symbol not in self.tradable:
             print(f"Asset {symbol} is not tradable.")
             return
         ask, bid = self.bid_ask_map[symbol]
         if ask == -1 or bid ==-1:
             print(f"need to get quote data for {symbol}")
             return
-        print("test2")
-        buying_power = float(self.account.buying_power)*0.99
+        buying_power = self.cached_buying_power*0.99
         limit = 0.05 * buying_power # per trade limit
-        direction = signal[0]-signal[2]
-        qty = lambda limit_price: min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if not asset.fractionable else min(limit*abs(direction)/limit_price, buying_power/limit_price)
-
+        direction = signal[0]-signal[1]
         order = None
         if direction > 0: # Buy signal (limit order placed slightly above current price)
             limit_price = ask * (1 + 0.001)
-            quantity =qty(limit_price)
+            quantity =min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit*abs(direction)/limit_price, buying_power/limit_price)
             if buying_power > limit_price * quantity: #extra
                 print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
                 order = LimitOrderRequest(
@@ -160,19 +162,19 @@ class Trader():
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
                 )
-        else: # Sell signal
-            if symbol in self.client.get_all_positions():
-                limit_price = bid * (1 - 0.001)
-                quantity =qty(limit_price)
-                print(f"Placing limit sell order for {symbol} at price {limit_price} with quantity {quantity}")
-                qty = min(self.client.get_open_position(symbol).qty, quantity)
-                order = LimitOrderRequest(
-                    symbol=symbol,
-                    limit_price = limit_price,
-                    qty=quantity,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
-                )
+        elif direction < 0: # Sell signal
+            
+            limit_price = bid * (1 - 0.001)
+            quantity = min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit*abs(direction)/limit_price, buying_power/limit_price)
+            quantity = min(self.client.get_open_position(symbol).qty, quantity)
+            print(f"Placing limit sell order for {symbol} at price {limit_price} with quantity {quantity}")
+            order = LimitOrderRequest(
+                symbol=symbol,
+                limit_price = limit_price,
+                qty=quantity,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
+            )
 
         return order
             
