@@ -16,7 +16,7 @@ PATH_TO_MODELS = Path(r"models")
 PATH_TO_KEYS = Path(r"config")
 API_KEY_FILE = PATH_TO_KEYS / r"public_key.txt"
 SECRET_KEY_FILE = PATH_TO_KEYS / r"secret_key.txt"
-MODEL_NAME = r"crypto_model1.4_weights.pth"
+MODEL_NAME = r"crypto_model1.6_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
 PATH_TO_DATASETS = Path(r"datasets")
@@ -32,6 +32,7 @@ X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "moment
 
 class Trader():
     def __init__(self):
+        self.bid_ask_map = {ticker+"/USD":[0,0] for ticker in TICKERS}
         self.embedding_map = {}
         self.bars_window = pd.DataFrame() # Initialize an empty DataFrame to store incoming bars data
         with open(EMBEDDING_LOOKUP, 'r') as f:
@@ -64,14 +65,17 @@ class Trader():
         
         self.stream.subscribe_bars(self.handle_data, *[ticker+"/USD" for ticker in TICKERS])
         print("Subscribed to tickers: ", TICKERS)
+        self.stream.subscribe_quotes(self.handle_quote, *[ticker+"/USD" for ticker in TICKERS])
+        print("Subscribed to quotes: ", TICKERS)
         self.stream.run()
 
 
     def signal_generator(self, ticker_id:torch.Tensor, features:torch.Tensor):
-        signal = 0 # Default to hold
+        signal = [0,0,0] # Default to hold
         with torch.no_grad():
             prediction = self.model(ticker_id.to(self.device), features.to(self.device))
-        signal = torch.argmax(prediction, dim=1).item() #buy / sell / hold, 0, 1, 2 respectively
+        signal = torch.softmax(prediction, dim=1).squeeze().tolist()  #buy / sell / hold, 0, 1, 2 respectively. returns a list
+
         return signal # No signal for the first data point since we don't have a previous close price
     
     def process(self, data):
@@ -98,7 +102,11 @@ class Trader():
         ticker_id = torch.as_tensor(self.embedding_map[data.symbol], dtype=torch.int64).unsqueeze(0) # Get the ticker ID from the embedding map and add a batch dimension
         features = torch.as_tensor([norm_open, norm_high, norm_low, log_volume, momentum], dtype=torch.float32).unsqueeze(0) # Create a tensor of features and add a batch dimension
         return ticker_id, features
-     
+    
+    async def handle_quote(self, data):
+        self.bid_ask_map[data.symbol] = [data.bid_price, data.ask_price]
+        print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
+
     async def handle_data(self, data):
         print(f"data received: {data}")
         data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
@@ -121,45 +129,48 @@ class Trader():
             pass
 
     def portfolio_management(self, signal, data):
-        buying_power = float(self.account.buying_power)*0.99
-        limit = max(0.05 * buying_power * abs(signal), 10.00)
+
         symbol = data.symbol.replace(".V", "/USD") # Convert symbol to match Alpaca's format for crypto trading
         asset = self.client.get_asset(symbol) # Check if the asset is tradable
         if not asset.tradable:
             print(f"Asset {symbol} is not tradable.")
             return
-        # limit_price = (data.close+0.03 if signal == 0 else data.close*(1-0.05/100)) # Set limit price slightly above current price for buy orders and slightly below for sell orders to increase chances of execution
-        price = data.close
-        if not asset.fractionable:
-            qty = min(int(limit // price), int(buying_power//price))
-        else:
-            qty = min(limit/price, buying_power/price) # Calculate the quantity to buy/sell based on
-            
+        ask, bid = self.bid_ask_map[symbol]
+        if ask == 0 or bid ==0:
+            print(f"need to get quote data for {symbol}")
+            return
+        
+        buying_power = float(self.account.buying_power)*0.99
+        limit = 0.05 * buying_power # per trade limit
+        direction = signal[0]-signal[1]
+        qty = lambda limit_price: min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if not asset.fractionable else min(limit*abs(direction)/limit_price, buying_power/limit_price)
 
         order = None
-        if signal > 0: # Buy signal (limit order placed slightly above current price)
-            if buying_power > price * qty:
-                print(f"Placing buy order for {symbol} at limit price {data.close} with quantity {qty}")
-                order = MarketOrderRequest(
+        if direction > 0: # Buy signal (limit order placed slightly above current price)
+            limit_price = ask * (1 + 0.001)
+            quantity =qty(limit_price)
+            if buying_power > limit_price * quantity: #extra
+                print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
+                order = LimitOrderRequest(
                     symbol=symbol,
-                    qty=qty,
+                    limit_price = limit_price,
+                    qty=quantity,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
                 )
-        elif signal < 0: # Sell signal
-
+        else: # Sell signal
             if symbol in self.client.get_all_positions():
-                print(f"Placing sell order for {symbol} at limit price {data.close} with quantity {qty}")
-                qty = min(self.client.get_open_position(symbol).qty, qty)
-                order = MarketOrderRequest(
+                limit_price = bid * (1 - 0.001)
+                quantity =qty(limit_price)
+                print(f"Placing limit sell order for {symbol} at price {limit_price} with quantity {quantity}")
+                qty = min(self.client.get_open_position(symbol).qty, quantity)
+                order = LimitOrderRequest(
                     symbol=symbol,
-                    qty=qty,
+                    limit_price = limit_price,
+                    qty=quantity,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
                 )
-        else: # Hold signal
-            print(f"Holding position in {symbol}. No order placed.")
-            pass
 
         return order
             

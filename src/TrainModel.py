@@ -16,7 +16,7 @@ EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model1.5_weights.pth"
+MODEL_NAME = r"crypto_model1.7_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 # DATASET_NAME = r"us"
 DATASET_NAME = r"5_crypto_txt"
@@ -39,7 +39,7 @@ SUBDIRS = [r"cryptocurrencies"]
 
 #hyperparams
 BATCH_SIZE = 512
-EPOCHS = 10
+EPOCHS = 20
 
 X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
@@ -55,6 +55,9 @@ SELL_THRESH = 0.001 #threshold for sell signals, can be tuned as a hyperparamete
 #1.3 embedding_dims = 32, hidden_layers = [2048, 2048, 1024], sigmoid now
 #1.4 embedding_dims = 8, hidden_layers = [64, 32],  
 #1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy 
+#1.6 embedding_dims = 8, hidden_layers = [128, 64],
+#1.7 embedding_dims = 8, hidden_layers = [256, 128],
+
 
 class TrainModel:
     def __init__(self):
