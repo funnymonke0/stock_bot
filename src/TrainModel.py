@@ -43,8 +43,8 @@ EPOCHS = 20
 
 X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
-BUY_THRESH = 0.005 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
-SELL_THRESH = 0.001 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than -0.1%, otherwise hold.
+BUY_THRESH = 0 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
+SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than 0%, otherwise hold. we realistically should not hold it even for small fluctuations since it can keep building up in a slow decline.
 
 # time normalization constants
 # OPEN = 9*60 + 30
@@ -269,8 +269,8 @@ class TrainModel:
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    # stock_model.training_loop()
-    stock_model.load_model()
+    stock_model.training_loop()
+    # stock_model.load_model()
     stock_model.evaluate()
     
 

@@ -61,12 +61,8 @@ class Trader():
         self.tradable = [asset.symbol for asset in all_assets if asset.tradable]
         self.frac = [asset.symbol for asset in all_assets if asset.fractionable]
         self.tickers = [ticker.replace("/USD", "") for ticker in self.tradable if ticker.replace("/USD", ".V") in self.embedding_map.keys()]
-        all_positions = self.client.get_all_positions()
         self.bid_ask_map = {ticker+"/USD":[-1,-1] for ticker in self.tickers}
-        self.local_positions = {ticker:0.0 for ticker in self.tickers}
-        for p in all_positions:
-            self.local_positions[p.symbol.replace("USD", "/USD")] = float(p.qty)
-        print(self.local_positions)
+        
         print(f"Initialized trader with account status: {self.account.crypto_status}")
 
     
@@ -130,15 +126,10 @@ class Trader():
             print(f"Generated signal: {signal} for data {data}")
             with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
                 f.write(f"{data.timestamp}: {symbol} - Signal: {signal}\n")
-            order = self.portfolio_management(signal, symbol)
-            if order is not None:
-                try:
-                    self.client.submit_order(order)
-                    print(f"Order submitted: {order}")
-                    self.cached_buying_power = self.account.buying_power
-                    self.local_positions[symbol] = self.client.get_open_position(symbol).qty
-                except Exception as e:
-                    print(f"Error submitting order: {e}")
+            self.cached_buying_power = self.account.buying_power
+
+            self.portfolio_management(signal, symbol)
+
         else:
             # print("Not enough data to generate features and signal yet.")
             pass
@@ -148,18 +139,20 @@ class Trader():
         if symbol not in self.tradable:
             print(f"Asset {symbol} is not tradable.")
             return
+        
         ask, bid = self.bid_ask_map[symbol]
         if ask <=0 or bid <=0:
             print(f"need to get quote data for {symbol}")
             return
-        buying_power = float(self.cached_buying_power)*0.95
-        limit = 0.05 * buying_power # per trade limit
+        
         direction = signal[0]-signal[1]
-        print(direction)
+        buying_power = float(self.cached_buying_power)*0.95
+        limit = max(0.005 * buying_power * abs(direction), 10) # per trade limit
+        
         order = None
         if direction > 0: # Buy signal (limit order placed slightly above current price)
             limit_price = ask * (1 + 0.001)
-            quantity =min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit*abs(direction)/limit_price, buying_power/limit_price)
+            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
             if buying_power > limit_price * quantity: #extra
                 print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
                 order = LimitOrderRequest(
@@ -167,26 +160,38 @@ class Trader():
                     limit_price = limit_price,
                     qty=quantity,
                     side=OrderSide.BUY,
-                    time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
+                    time_in_force=TimeInForce.GTC,
+                    extended_hours = True
                 )
+
         elif direction < 0: # Sell signal
-            if symbol in self.local_positions.keys():
-                limit_price = bid * (1 - 0.001)
-                quantity = min(int(limit*abs(direction) // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit*abs(direction)/limit_price, buying_power/limit_price)
-                quantity = min(self.local_positions[symbol], quantity)
-                print(f"Placing limit sell order for {symbol} at price {limit_price} with quantity {quantity}")
+            limit_price = bid * (1 - 0.001)
+            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
+            try:
+                position = self.client.get_open_position(symbol.replace("/USD", "USD")) 
+                current_qty = float(position.qty)
+                print(f"current qty: {current_qty}")
+                quantity = min(current_qty, quantity)
+                print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
                 order = LimitOrderRequest(
                     symbol=symbol,
                     limit_price = limit_price,
                     qty=quantity,
                     side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC # Cancel if not filled by end of day
+                    time_in_force=TimeInForce.GTC,
+                    extended_hours = True
                 )
-
-        return order
-            
+            except Exception as e:
+                print(f"no open position for symbol: {symbol}")
+        else:
+            print("Holding")
         
-            
+        if order is not None:
+            try:
+                self.client.submit_order(order)
+                print(f"Order submitted: {order}")
+            except Exception as e:
+                print(f"Error submitting order: {e}")
 
 
 if __name__ == "__main__":
