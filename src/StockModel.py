@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class StockModel(nn.Module):
-    def __init__(self, feature_size, embed_size, embedding_dims = 8, hidden_layers = [64,32], dropout=0.3, output_size=3):
+    def __init__(self, feature_size, embed_size, embedding_dims = 8, hidden_layers = [128,64], dropout=0.3, output_size=3):
         super(StockModel, self).__init__()
 
         self.ticker_embedding = nn.Embedding(num_embeddings=embed_size, embedding_dim=embedding_dims)

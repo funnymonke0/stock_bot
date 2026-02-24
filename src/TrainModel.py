@@ -54,7 +54,7 @@ SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. t
 #1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
 #1.3 embedding_dims = 32, hidden_layers = [2048, 2048, 1024], sigmoid now
 #1.4 embedding_dims = 8, hidden_layers = [64, 32],  sigmoid bad
-#1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy 
+#1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy (its worse than guessing apparently)
 #1.6 embedding_dims = 8, hidden_layers = [128, 64], around same
 #2.0 embedding_dims = 8, hidden_layers = [128, 64], [ (Price/VWAP_rolling), (RSI_9), (Log_Return_1m), (Volume_ZScore) ]
 
