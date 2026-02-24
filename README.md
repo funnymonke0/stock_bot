@@ -31,4 +31,5 @@ The core of this bot is a Multi-Layer Perceptron. It is trained on historical fe
 
 ##Results (confusion matrices, actual accuracies vary around 40%, which I have not graphed yet)
 * [Results tab](./results)
+* Example for crypto model version 1.6:
 * ![model 1.6 confusion matrix](./results/1.6_results.png)
