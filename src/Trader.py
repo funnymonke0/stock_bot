@@ -12,6 +12,7 @@ from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetAs
 from alpaca.trading.enums import AssetClass
 from alpaca.trading.enums import OrderSide, TimeInForce
 
+ACCURACY = 0.42 # accuracy of the signal generator
 EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_KEYS = Path(r"config")
@@ -163,7 +164,7 @@ class Trader():
         limit = max(0.005 * buying_power * abs(direction), 10) # per trade limit
         
         order = None
-        if direction > 0: # Buy signal (limit order placed slightly above current price)
+        if signal[0] > ACCURACY and direction > 0: # Buy signal (limit order placed slightly above current price)
             limit_price = ask * (1 + 0.001)
             quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
             if buying_power > limit_price * quantity: #extra
@@ -177,18 +178,19 @@ class Trader():
                     extended_hours = True
                 )
 
-        elif direction < 0: # Sell signal
-            # limit_price = bid * (1 - 0.001)
-            limit_price = bid
+        elif signal[1] > ACCURACY and direction < 0: # Sell signal
+            limit_price = bid * (1 - 0.001)
+            # limit_price = bid
             quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
             try:
                 position = self.client.get_open_position(symbol.replace("/USD", "USD")) 
                 current_qty = float(position.qty)
                 quantity = min(current_qty, quantity)
-                # print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
-                print(f"Placing instant sell order for {symbol} at price {limit_price} with quantity {quantity}")
-                order = MarketOrderRequest(
+                print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
+                # print(f"Placing instant sell order for {symbol} at price {limit_price} with quantity {quantity}")
+                order = LimitOrderRequest(
                     symbol=symbol,
+                    limit_price = limit_price,
                     qty=quantity,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,

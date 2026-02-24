@@ -6,8 +6,8 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from pathlib import Path
 from StockModel import StockModel
-
-
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
 
 # Put in config at some point
 RELOAD = True # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
@@ -16,7 +16,7 @@ EPSILON = 2**-52 # the most tiniest didyblud
 PATH_TO_DATASETS = Path(r"datasets")
 PATH_TO_MODELS = Path(r"models")
 PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model1.6_weights.pth"
+MODEL_NAME = r"crypto_model1.5_weights.pth"
 MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
 # DATASET_NAME = r"us"
 DATASET_NAME = r"5_crypto_txt"
@@ -56,8 +56,7 @@ SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. t
 #1.4 embedding_dims = 8, hidden_layers = [64, 32],  sigmoid bad
 #1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy 
 #1.6 embedding_dims = 8, hidden_layers = [128, 64], around same
-
-
+#2.0 embedding_dims = 8, hidden_layers = [128, 64], [ (Price/VWAP_rolling), (RSI_9), (Log_Return_1m), (Volume_ZScore) ]
 
 class TrainModel:
     def __init__(self):
@@ -149,7 +148,7 @@ class TrainModel:
         #label generation
         future_return = self.dataframe.groupby("<TICKER>",sort=False, observed=False)["momentum"].shift(-1) #shift the momentum; if the previous close was lower than the current close, the PREVIOUS entry was a buy.
         self.dataframe["label"] = np.select(
-            [future_return > BUY_THRESH, future_return < SELL_THRESH], #we not short selling with an automated bot bruh you crazy
+            [future_return > BUY_THRESH, future_return < SELL_THRESH],
             [0, 1],
             default=2
         ) #buy / sell / hold, 0, 1, 2
@@ -161,8 +160,9 @@ class TrainModel:
         total = counts.sum()
         raw_weights =[total/counts[i] for i in range(3)]
         mean_weight = sum(raw_weights) / len(raw_weights)
-
-        self.weights_tensor = torch.as_tensor([(raw_weights[i]/mean_weight) for i in range(3)], dtype=torch.float32)
+        final_weights = [(raw_weights[i]/mean_weight) for i in range(3)]
+        print(final_weights)
+        self.weights_tensor = torch.as_tensor(final_weights, dtype=torch.float32)
         self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
         self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
         self.x_tensor = torch.as_tensor(self.dataframe[X_FEATURE_COLUMNS].values, dtype=torch.float32)
@@ -242,20 +242,26 @@ class TrainModel:
         self.optim_model.eval()
         correct = 0
         total = 0
+        
+        cm = confusion_matrix([1],[1])
         with torch.no_grad():
             for x_id_batch, x_batch, y_batch in self.testloader:
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device, non_blocking=True)
                 y_batch = y_batch.to(self.device, non_blocking=True)
                 outputs = self.optim_model(x_id_batch, x_batch) # forward pass
+                
                 predicted = torch.argmax(outputs, dim=1) #predicted class labels
+                cm = confusion_matrix(y_batch.cpu().detach().numpy(), outputs.cpu().detach().numpy().argmax(axis=1), labels=[0, 1, 2])
                 correct += (predicted == y_batch).sum().item() # count correct predictions
                 total += y_batch.size(0) # total number of labels
         if total == 0:
             print('No test samples available to evaluate accuracy.')
         else:
             print(f'Accuracy of the model on the test data: {correct} correct predictions out of {total} total samples; {100 * correct / total:.2f}%')  
-
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Buy', 'Sell', 'Hold'])
+            disp.plot()
+            plt.show()
 
     def load_model(self):# loads the model state dict from the saved file. we do this in a separate function so that we can easily reload the model and just prepare the loaders without having to reload and preprocess the data again if we want to continue training or evaluate.
         if not (MODEL_PATH).exists():
@@ -269,8 +275,8 @@ class TrainModel:
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    stock_model.training_loop()
-    # stock_model.load_model()
+    # stock_model.training_loop()
+    stock_model.load_model()
     stock_model.evaluate()
     
 
