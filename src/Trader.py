@@ -34,7 +34,19 @@ class Trader():
     def __init__(self):
         self.tickers = TICKERS
         self.embedding_map = {}
-        self.bars_window = pd.DataFrame() # Initialize an empty DataFrame to store incoming bars data
+        self.dtypes = {
+            'symbol': 'category',
+            'timestamp': 'datetime64[ns]',
+            'open': 'float64',
+            'high': 'float64',
+            'low': 'float64',
+            'close': 'float64',
+            'volume': 'int32',
+            "trade_count": "int32",
+            "vwap" : "float32"
+        }
+        self.bars_window = pd.DataFrame({k: pd.Series(dtype=v) for k, v in self.dtypes.items()})
+
         with open(EMBEDDING_LOOKUP, 'r') as f:
             self.embedding_map = json.load(f)
             self.embedding_map = {v:int(k) for k,v in self.embedding_map.items()}# Invert the embedding map to get a mapping from ticker symbols to their corresponding IDs
@@ -61,6 +73,8 @@ class Trader():
         self.tradable = [asset.symbol for asset in all_assets if asset.tradable]
         self.frac = [asset.symbol for asset in all_assets if asset.fractionable]
         self.tickers = [ticker.replace("/USD", "") for ticker in self.tradable if ticker.replace("/USD", ".V") in self.embedding_map.keys()]
+        self.bars_window["symbol"] = pd.Series(self.tickers, dtype="category")
+        print(self.bars_window)
         self.bid_ask_map = {ticker+"/USD":[-1,-1] for ticker in self.tickers}
         
         print(f"Initialized trader with account status: {self.account.crypto_status}")
@@ -87,16 +101,15 @@ class Trader():
     
     def process(self, data):
         data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
+        print(data.symbol)
         new_row = pd.DataFrame([data.__dict__])
-        self.bars_window = pd.concat([self.bars_window, new_row]).sort_values(['symbol', 'timestamp']).dropna(inplace=False).iloc[-(50*len(self.tickers)):] 
-        self.bars_window['symbol'] = self.bars_window['symbol'].astype('category')
-        if data.symbol not in self.bars_window['symbol'].cat.categories:
-            print(f"Symbol {data.symbol} not in bars window categories yet. Skipping processing for this data point.")
-            return None, None
-        symbol_group = self.bars_window.groupby('symbol', sort=False, observed=False).get_group(data.symbol) # Get the group of rows corresponding to the symbol of the incoming data point
+        self.bars_window = pd.concat([self.bars_window, new_row], ignore_index=True).dropna(subset=['symbol', 'timestamp',"open", "high", "low", "close", "volume"],inplace=False).groupby("symbol", sort=False, observed=True).tail(50) #21 minimum but keeping this in case of some faulty bars.
+        
+        symbol_group = self.bars_window.groupby('symbol', sort=False, observed=True).get_group(data.symbol) # Get the group of rows corresponding to the symbol of the incoming data point
         
         #for each symbol...
         if len(symbol_group) < 3: # We need at least 3 data points to compute the features
+            print(f"not enough data for symbol {data.symbol} yet. skipping.")
             return None, None
         
         norm = symbol_group['close'].iloc[-2] 
@@ -165,17 +178,17 @@ class Trader():
                 )
 
         elif direction < 0: # Sell signal
-            limit_price = bid * (1 - 0.001)
+            # limit_price = bid * (1 - 0.001)
+            limit_price = bid
             quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
             try:
                 position = self.client.get_open_position(symbol.replace("/USD", "USD")) 
                 current_qty = float(position.qty)
-                print(f"current qty: {current_qty}")
                 quantity = min(current_qty, quantity)
-                print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
-                order = LimitOrderRequest(
+                # print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
+                print(f"Placing instant sell order for {symbol} at price {limit_price} with quantity {quantity}")
+                order = MarketOrderRequest(
                     symbol=symbol,
-                    limit_price = limit_price,
                     qty=quantity,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
