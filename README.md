@@ -30,5 +30,5 @@ The core of this bot is a Multi-Layer Perceptron. It is trained on historical fe
 * I chose to keep these inputs simple normalized ohlcv values, but will update at a later date
 
 ##Results (confusion matrices, actual accuracies vary around 40%, which I have not graphed yet)
-[Results tab](./results)
-![model 1.6 confusion matrix](./results/1.6_results.png)
+* [Results tab](./results)
+* ![model 1.6 confusion matrix](./results/1.6_results.png)
