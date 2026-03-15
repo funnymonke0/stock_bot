@@ -11,27 +11,32 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
 import matplotlib.pyplot as plt
+from AppConfig import (
+    EPSILON,
+    RSI_PERIOD,
+    Z_PERIOD,
+    DATASET_NAME,
+    X_FEATURE_COLUMNS,
+    PATH_TO_DATASETS,
+    PATH_TO_MODELS,
+    PATH_TO_PRECOMPUTE,
+    EMBEDDING_LOOKUP,
+    X_TENSOR,
+    X_ID_TENSOR,
+    Y_TENSOR,
+    WEIGHTS_TENSOR,
+    SUBDIRS,
+    TRAIN_MODEL_VERSION,
+    TRAIN_MODEL_NAME,
+    TRAIN_MODEL_PATH,
+)
 
 # Put in config at some point
 RELOAD = True # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
-EPSILON = 2**-52 # the most tiniest didyblud
-RSI_PERIOD = 9
-Z_PERIOD = 20
-# PATH_TO_DATASETS = Path(r"datasets\5_us_txt\data\5 min")
-PATH_TO_DATASETS = Path(r"datasets")
-PATH_TO_MODELS = Path(r"models")
-PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-MODEL_NAME = r"crypto_model2.0.3_weights.pth"
-MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
-# DATASET_NAME = r"us"
-DATASET_NAME = r"5_crypto_txt"
+MODEL_NAME = TRAIN_MODEL_NAME
+MODEL_PATH = TRAIN_MODEL_PATH
 DATASET = PATH_TO_DATASETS/DATASET_NAME
 PARQUET = PATH_TO_DATASETS/(DATASET_NAME+r".parquet")
-EMBEDDING_LOOKUP = PATH_TO_PRECOMPUTE/(DATASET_NAME+r"_embedding_lookup.json")
-X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
-X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
-Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
-WEIGHTS_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_weights_tensor.pt")
 
 PATH_TO_PRECOMPUTE.mkdir(parents=True, exist_ok=True)
 PATH_TO_MODELS.mkdir(parents=True, exist_ok=True)
@@ -40,14 +45,12 @@ PATH_TO_DATASETS.mkdir(parents=True, exist_ok=True)
 print(f"Loading from: {DATASET}")
 
 # SUBDIRS = [r"nysemkt stocks",r"nyse stocks\1", r"nyse stocks\2", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3"]
-SUBDIRS = [r"cryptocurrencies"]
 
 #hyperparams
 BATCH_SIZE = 512
 EPOCHS = 20
 
 # X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
-X_FEATURE_COLUMNS = ["vol_z", "vwap_z", "return_z", "rsi9_norm"]
 
 BUY_THRESH = 0 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
 SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than 0%, otherwise hold. we realistically should not hold it even for small fluctuations since it can keep building up in a slow decline.
@@ -56,15 +59,7 @@ SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. t
 # OPEN = 9*60 + 30
 # CLOSE = 16*60
 
-#1.1 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
-#1.2 embedding_dims = 32, hidden_layers = [2048, 2048, 1024] 3 logit output
-#1.3 embedding_dims = 32, hidden_layers = [2048, 2048, 1024], sigmoid now
-#1.4 embedding_dims = 8, hidden_layers = [64, 32],  sigmoid bad
-#1.5 embedding_dims = 8, hidden_layers = [64, 32], back to 3 logit cross entropy (its worse than guessing apparently)
-#1.6 embedding_dims = 8, hidden_layers = [128, 64], around same
-#2.0.1 embedding_dims = 16, hidden_layers = [64,32,16], dropout=0.2, [ (Price/VWAP_rolling), (RSI_9), (Log_Return_1m), (Volume_ZScore) ]
-#2.0.2 embedding_dims = 8, hidden_layers = [128, 64], dropout = 0.5
-#2.0.3 embedding_dims = 8, hidden_layers = [64, 32], dropout = 0.2
+# Model version history/details are centralized in AppConfig.MODEL_REGISTRY
 
 
 class TrainModel:
@@ -84,6 +79,7 @@ class TrainModel:
         
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
+        print(f"Using train model version {TRAIN_MODEL_VERSION}: {MODEL_NAME}")
         if not RELOAD:
             self.load_tensors()
         if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None:

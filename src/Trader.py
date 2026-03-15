@@ -1,4 +1,3 @@
-from pathlib import Path
 import pandas as pd
 import numpy as np
 import json
@@ -15,29 +14,36 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
+from AppConfig import (
+    EPSILON,
+    RSI_PERIOD,
+    Z_PERIOD,
+    X_FEATURE_COLUMNS,
+    EMBEDDING_LOOKUP,
+    X_ID_TENSOR,
+    TRADER_MODEL_VERSION,
+    TRADER_MODEL_PATH,
+    load_api_keys,
+)
 
-EPSILON = 2**-52 # the most tiniest didyblud
-PATH_TO_MODELS = Path(r"models")
-PATH_TO_KEYS = Path(r"config")
-API_KEY_FILE = PATH_TO_KEYS / r"public_key.txt"
-SECRET_KEY_FILE = PATH_TO_KEYS / r"secret_key.txt"
-MODEL_NAME = r"crypto_model2.0.3_weights.pth"
-MODEL_PATH = PATH_TO_MODELS / MODEL_NAME
-PATH_TO_PRECOMPUTE = Path(r"precompute_cache")
-PATH_TO_DATASETS = Path(r"datasets")
-DATASET_NAME = r"5_crypto_txt"
-EMBEDDING_LOOKUP = PATH_TO_PRECOMPUTE/(DATASET_NAME+r"_embedding_lookup.json")
-X_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_tensor.pt")
-X_ID_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_x_id_tensor.pt")
-Y_TENSOR = PATH_TO_PRECOMPUTE/ (DATASET_NAME+r"_y_tensor.pt")
-
-RSI_PERIOD = 9
-Z_PERIOD = 20
-
-# TICKERS = ["BTC", "ETH", "BCH", "LTC", "UNI", "SOL", "AVAX", "XRP", "DOGE", "USDC", "USDT","BCH","AAVE", "DOT", "LINK", "CRV", "XTZ", "YFI"] # List of tickers to subscribe to
-X_FEATURE_COLUMNS = ["vol_z", "vwap_z", "return_z", "rsi9_norm"]
 TICKERS = []
 class Trader():
+    @staticmethod
+    def to_stream_symbol(base_symbol: str) -> str:
+        return f"{base_symbol}/USD"
+
+    @staticmethod
+    def to_model_symbol(stream_symbol: str) -> str:
+        return stream_symbol.replace("/USD", ".V")
+
+    @staticmethod
+    def to_order_symbol(stream_symbol: str) -> str:
+        return stream_symbol.replace("/USD", "USD")
+
+    @staticmethod
+    def to_base_symbol(symbol: str) -> str:
+        return symbol.replace("/USD", "").replace("USD", "")
+
     def __init__(self):
         self.tickers = TICKERS
         self.embedding_map = {}
@@ -57,32 +63,30 @@ class Trader():
         with open(EMBEDDING_LOOKUP, 'r') as f:
             self.embedding_map = json.load(f)
             self.embedding_map = {v:int(k) for k,v in self.embedding_map.items()}# Invert the embedding map to get a mapping from ticker symbols to their corresponding IDs
-        print(self.embedding_map)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         x_id_tensor = torch.load(X_ID_TENSOR)
         embed_size = x_id_tensor.max().item() + 1
         self.model = StockModel(feature_size=len(X_FEATURE_COLUMNS), embed_size=embed_size)
-        state_dict = torch.load(MODEL_PATH, map_location=self.device,weights_only=True)
+        state_dict = torch.load(TRADER_MODEL_PATH, map_location=self.device,weights_only=True)
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
-        self.model = torch.compile(self.model)
         self.model.eval()
+        print(f"Using trader model version {TRADER_MODEL_VERSION}: {TRADER_MODEL_PATH.name}")
 
-        with open(API_KEY_FILE, "r") as f:
-            API_KEY = f.readline()
-        with open(SECRET_KEY_FILE, "r") as f:
-            SECRET_KEY = f.readline()
+        API_KEY, SECRET_KEY = load_api_keys()
         self.stream = CryptoDataStream(API_KEY, SECRET_KEY, url_override=r"wss://stream.data.alpaca.markets/v1beta3/crypto/us")
         self.client = TradingClient(API_KEY, SECRET_KEY, paper=True)
         self.account = self.client.get_account()
-        self.cached_buying_power = float(self.account.buying_power)
-        all_assets = self.client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO))
-        self.tradable = [asset.symbol for asset in all_assets if asset.tradable]
-        self.frac = [asset.symbol for asset in all_assets if asset.fractionable]
-        self.tickers = [ticker.replace("/USD", "") for ticker in self.tradable if ticker.replace("/USD", ".V") in self.embedding_map.keys()]
-        self.bars_window["symbol"] = pd.Series(self.tickers, dtype="category")
+        assets = self.client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO))
+        self.asset_map = {
+            self.to_base_symbol(asset.symbol): asset
+            for asset in assets
+            if self.to_model_symbol(asset.symbol) in self.embedding_map.keys()
+        }
+        self.tickers = list(self.asset_map.keys())
+        self.bars_window["symbol"] = pd.Series([f"{ticker}.V" for ticker in self.tickers], dtype="category")
+        self.bid_ask_map = {self.to_stream_symbol(ticker): [-1, -1] for ticker in self.tickers} # Initialize bid-ask map with default values
         print(self.bars_window)
-        self.bid_ask_map = {ticker+"/USD":[-1,-1] for ticker in self.tickers}
         
         print(f"Initialized trader with account status: {self.account.crypto_status}")
 
@@ -91,9 +95,10 @@ class Trader():
         # Connect to the Alpaca data stream and subscribe to the desired tickers
         print("Connecting to Alpaca data stream...")
         
-        self.stream.subscribe_bars(self.handle_data, *[ticker+"/USD" for ticker in self.tickers])
+        stream_symbols = [self.to_stream_symbol(ticker) for ticker in self.tickers]
+        self.stream.subscribe_bars(self.handle_data, *stream_symbols)
         print("Subscribed to tickers: ", self.tickers)
-        self.stream.subscribe_quotes(self.handle_quote, *[ticker+"/USD" for ticker in self.tickers])
+        self.stream.subscribe_quotes(self.handle_quote, *stream_symbols)
         print("Subscribed to quotes: ", self.tickers)
         self.stream.run()
 
@@ -130,16 +135,18 @@ class Trader():
             ('squasher', FunctionTransformer(np.tanh)),
         ])
 
-        data.symbol = data.symbol.replace("/USD", ".V") # Remove the "/USD" suffix from the symbol to match the ticker format in the embedding map
-        print(data.symbol)
+        stream_symbol = data.symbol
+        model_symbol = self.to_model_symbol(stream_symbol)
+        print(model_symbol)
         new_row = pd.DataFrame([data.__dict__])
+        new_row.loc[:, "symbol"] = model_symbol
         self.bars_window = pd.concat([self.bars_window, new_row], ignore_index=True).dropna(subset=['symbol', 'timestamp',"open", "high", "low", "close", "volume"],inplace=False).groupby("symbol", sort=False, observed=True).tail(50) #21 minimum but keeping this in case of some faulty bars.
         
-        symbol_group = self.bars_window.groupby('symbol', sort=False, observed=True).get_group(data.symbol).copy() # Get the group of rows corresponding to the symbol of the incoming data point
+        symbol_group = self.bars_window.groupby('symbol', sort=False, observed=True).get_group(model_symbol).copy() # Get the group of rows corresponding to the symbol of the incoming data point
         
         #for each symbol...
         if len(symbol_group) < 21: # We need at least 21 data points to compute the features
-            print(f"not enough data for symbol {data.symbol} yet. {len(symbol_group)}/21 data points available. skipping.")
+            print(f"not enough data for symbol {model_symbol} yet. {len(symbol_group)}/21 data points available. skipping.")
             return None, None
         
         #VWAP price volume
@@ -173,92 +180,130 @@ class Trader():
         }])
         feature_row = feature_row.replace([np.inf, -np.inf], np.nan)
         x_features = pipeline.fit_transform(feature_row)
-        ticker_id = torch.tensor([self.embedding_map[data.symbol]], dtype=torch.int64) # batch size of 1
+        ticker_id = torch.tensor([self.embedding_map[model_symbol]], dtype=torch.int64) # batch size of 1
         features = torch.as_tensor(x_features, dtype=torch.float32).reshape(1, -1) # shape: (1, feature_size)
         return ticker_id, features
     
     async def handle_quote(self, data):
-        self.bid_ask_map[data.symbol] = [data.bid_price, data.ask_price]
+        self.bid_ask_map[data.symbol] = [float(data.bid_price), float(data.ask_price)]
         # print(f"quotes recieved {data.symbol}, bid: {data.bid_price}, ask: {data.ask_price}")
         # print(self.bid_ask_map)
 
     async def handle_data(self, data):
         print(f"data received: {data}")
-        symbol = data.symbol
+        stream_symbol = data.symbol
         ticker_id, features = self.process(data)
         if ticker_id is not None and features is not None:
             # print(f"Ticker ID: {ticker_id}, Features: {features}")
             signal = self.signal_generator(ticker_id=ticker_id, features=features)
             print(f"Generated signal: {signal} for data {data}")
-            with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
-                f.write(f"{data.timestamp}: {symbol} - Signal: {signal}\n")
-            self.cached_buying_power = self.account.buying_power
+            # with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
+            #     f.write(f"{data.timestamp}: {symbol} - Signal: {signal}\n")
 
-            self.portfolio_management(signal, symbol)
-
+            order = self.portfolio_management(signal, stream_symbol)
+            if order:
+                try:
+                    self.client.submit_order(order)
+                    print(f"Order submitted: {order}")
+                except Exception as e:
+                    print(f"Error submitting order: {e}")
         else:
             # print("Not enough data to generate features and signal yet.")
             pass
 
+
+
     def portfolio_management(self, signal, symbol):
-        print(symbol)
-        if symbol not in self.tradable:
-            print(f"Asset {symbol} is not tradable.")
-            return
+        base_symbol = self.to_base_symbol(symbol)
+        order_symbol = self.to_order_symbol(symbol)
+        bid, ask = self.bid_ask_map[symbol]
+        position = None
+        direction = signal[0]-signal[1]
+        buying_power = float(self.account.non_marginable_buying_power)*0.95
+        limit = max(0.005 * buying_power * abs(direction), 10) # per trade limit
+        order = None
         
-        ask, bid = self.bid_ask_map[symbol]
+        if not self.asset_map[base_symbol].tradable:
+            print(f"Asset {base_symbol} is not tradable. Cannot place order.")
+            return None
         if ask <=0 or bid <=0:
             print(f"need to get quote data for {symbol}")
-            return
-        
-        direction = signal[0]-signal[1]
-        buying_power = float(self.cached_buying_power)*0.95
-        limit = max(0.005 * buying_power * abs(direction), 10) # per trade limit
-        
-        order = None
+            return None
+        try: 
+            position = self.client.get_open_position(order_symbol)
+        except Exception as e:
+            print(f"no open position for symbol: {symbol}")
+
         if signal[0] > 1/3 and direction > 0: # Buy signal (limit order placed slightly above current price)
             limit_price = ask * (1 + 0.001)
-            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
+            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if not self.asset_map[base_symbol].fractionable else min(limit/limit_price, buying_power/limit_price)
             if buying_power > limit_price * quantity: #extra
                 print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
                 order = LimitOrderRequest(
-                    symbol=symbol,
+                    symbol=order_symbol,
                     limit_price = limit_price,
                     qty=quantity,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC,
                     extended_hours = True
                 )
-
-        elif signal[1] > 1/3 and direction < 0: # Sell signal
-            limit_price = bid * (1 - 0.001)
-            # limit_price = bid
-            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if symbol not in self.frac else min(limit/limit_price, buying_power/limit_price)
-            try:
-                position = self.client.get_open_position(symbol.replace("/USD", "USD")) 
-                current_qty = float(position.qty)
-                quantity = min(current_qty, quantity)
-                print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
-                # print(f"Placing instant sell order for {symbol} at price {limit_price} with quantity {quantity}")
+        elif position and signal[1] > 1/3 and direction < 0: # Sell signal (market order to sell the entire position to prevent getting stuck with a losing position, since limit orders can fail to execute if the price keeps dropping)
+            order = MarketOrderRequest(
+                symbol=order_symbol,
+                qty=float(position.qty),
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                extended_hours = True
+            )
+        
+        elif position and float(position.unrealized_pl) > 0.004 * float(position.cost_basis): # take profit if the unrealized profit exceeds 40% of the cost basis
+                limit_price = bid * (1 - 0.001)
+                print(f"Taking profit on {symbol} with unrealized P/L of {float(position.unrealized_pl)} at limit price {limit_price}")
                 order = LimitOrderRequest(
-                    symbol=symbol,
-                    limit_price = limit_price,
-                    qty=quantity,
+                    symbol=order_symbol,
+                    limit_price=limit_price,
+                    qty=float(position.qty),
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
                     extended_hours = True
                 )
-            except Exception as e:
-                print(f"no open position for symbol: {symbol}")
+        elif position and float(position.unrealized_pl) < -0.001 * float(position.cost_basis): # stop loss if the unrealized loss exceeds 1% of the cost basis
+            print(f"Stopping loss on {symbol} with unrealized P/L of {float(position.unrealized_pl)} at market price")
+            order = MarketOrderRequest(
+                symbol=order_symbol,
+                qty=float(position.qty),
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                extended_hours = True
+            )
         else:
             print("Holding")
-        #add something to sell if the current close is lower, regardless of signal, to prevent getting stuck with a losing position. maybe a market order if the price drops more than 1% below the last close or something like that. also maybe add a stop loss to the limit orders.
-        if order is not None:
-            try:
-                self.client.submit_order(order)
-                print(f"Order submitted: {order}")
-            except Exception as e:
-                print(f"Error submitting order: {e}")
+        return order
+        
+        # elif signal[1] > 1/3 and direction < 0: # only for short selling, which is currently disabled since not all assets are marginable and it adds extra risk. Sell signal (limit order placed slightly below current price to prevent getting stuck with a losing position)
+        #     limit_price = bid * (1 - 0.001)
+        #     # limit_price = bid
+        #     quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if not self.asset_map[symbol].fractionable else min(limit/limit_price, buying_power/limit_price)
+        #     try:
+        #         position = self.client.get_open_position(symbol.replace("/USD", "USD")) 
+        #         current_qty = float(position.qty)
+        #         quantity = min(current_qty, quantity)
+        #         print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
+        #         # print(f"Placing instant sell order for {symbol} at price {limit_price} with quantity {quantity}")
+        #         order = LimitOrderRequest(
+        #             symbol=symbol,
+        #             limit_price = limit_price,
+        #             qty=quantity,
+        #             side=OrderSide.SELL,
+        #             time_in_force=TimeInForce.GTC,
+        #             extended_hours = True
+        #         )
+        #     except Exception as e:
+        #         print(f"no open position for symbol: {symbol}")
+        # else:
+        #     print("Holding")
+
+        
 
 
 if __name__ == "__main__":
