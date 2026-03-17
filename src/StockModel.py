@@ -23,7 +23,7 @@ class StockModel(nn.Module):
         self.sequential_layers.append(nn.Linear(next_size, output_size))
         self.model = nn.Sequential(*self.sequential_layers)
         
-    def forward(self, x_id, x_features):
+    def forward(self, x_id, x_features) -> torch.Tensor:
         x_embed = self.ticker_embedding(x_id) #embed ticker ids
         x = torch.cat((x_embed, x_features), dim=1) #concatenate embeddings with other features and flatten to 1 dimension
         return self.model(x)

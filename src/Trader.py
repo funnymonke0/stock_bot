@@ -7,22 +7,20 @@ from StockModel import StockModel
 
 from alpaca.data.live import StockDataStream, CryptoDataStream
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetAssetsRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetAssetsRequest, ClosePositionRequest
 from alpaca.trading.enums import AssetClass
 from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.common.exceptions import APIError
 
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import FunctionTransformer
 from AppConfig import (
     EPSILON,
     RSI_PERIOD,
     Z_PERIOD,
-    X_FEATURE_COLUMNS,
     EMBEDDING_LOOKUP,
-    X_ID_TENSOR,
     TRADER_MODEL_VERSION,
     TRADER_MODEL_PATH,
+    TRADER_MODEL_CONFIG,
+    PIPELINE,
     load_api_keys,
 )
 
@@ -64,12 +62,9 @@ class Trader():
             self.embedding_map = json.load(f)
             self.embedding_map = {v:int(k) for k,v in self.embedding_map.items()}# Invert the embedding map to get a mapping from ticker symbols to their corresponding IDs
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        x_id_tensor = torch.load(X_ID_TENSOR)
-        embed_size = x_id_tensor.max().item() + 1
-        self.model = StockModel(feature_size=len(X_FEATURE_COLUMNS), embed_size=embed_size)
+        self.model = StockModel(feature_size=len(TRADER_MODEL_CONFIG["features"]), embed_size=len(self.embedding_map), embedding_dims=TRADER_MODEL_CONFIG["embedding_dims"], output_size=TRADER_MODEL_CONFIG["output_size"], dropout=TRADER_MODEL_CONFIG["dropout"], hidden_layers=TRADER_MODEL_CONFIG["hidden_layers"])
         state_dict = torch.load(TRADER_MODEL_PATH, map_location=self.device,weights_only=True)
         self.model.load_state_dict(state_dict)
-        self.model.to(self.device)
         self.model.eval()
         print(f"Using trader model version {TRADER_MODEL_VERSION}: {TRADER_MODEL_PATH.name}")
 
@@ -103,7 +98,7 @@ class Trader():
         self.stream.run()
 
 
-    def signal_generator(self, ticker_id:torch.Tensor, features:torch.Tensor):
+    def signal_generator(self, ticker_id:torch.Tensor, features:torch.Tensor) -> float:
         ticker_id = ticker_id.to(torch.int64).reshape(-1)
         features = features.to(torch.float32)
         if features.dim() == 1:
@@ -119,22 +114,19 @@ class Trader():
             else:
                 raise ValueError(f"Batch mismatch: ticker_id={ticker_id.size(0)}, features={features.size(0)}")
 
-        if features.size(1) != len(X_FEATURE_COLUMNS):
-            raise ValueError(f"Feature width mismatch: got {features.size(1)}, expected {len(X_FEATURE_COLUMNS)}")
+        if features.size(1) != len(TRADER_MODEL_CONFIG["features"]):
+            raise ValueError(f"Feature width mismatch: got {features.size(1)}, expected {len(TRADER_MODEL_CONFIG['features'])}")
 
-        signal = [0,0,0] # Default to hold
+        # signal = [0,0,0] # Default to hold
+        signal = 0
         with torch.no_grad():
-            prediction = self.model(ticker_id.to(self.device), features.to(self.device))
-        signal = torch.softmax(prediction, dim=1).squeeze().tolist()  #buy / sell / hold, 0, 1, 2 respectively. returns a list
+            signal = self.model(ticker_id, features).item() # Get the single prediction value
+            # 
+        # signal = torch.softmax(prediction, dim=1).squeeze().tolist()  #buy / sell / hold, 0, 1, 2 respectively. returns a list
 
         return signal # No signal for the first data point since we don't have a previous close price
     
-    def process(self, data):
-        pipeline = Pipeline([
-            ('imputer', SimpleImputer(strategy='constant', fill_value=0, keep_empty_features=True)), #for the nan values of the z scores
-            ('squasher', FunctionTransformer(np.tanh)),
-        ])
-
+    def process(self, data): #eventually we can use separate files that compute each model's features, and just import the correct one based on the model version. This way we can have different features for different models.
         stream_symbol = data.symbol
         model_symbol = self.to_model_symbol(stream_symbol)
         print(model_symbol)
@@ -147,10 +139,10 @@ class Trader():
         #for each symbol...
         if len(symbol_group) < 21: # We need at least 21 data points to compute the features
             print(f"not enough data for symbol {model_symbol} yet. {len(symbol_group)}/21 data points available. skipping.")
-            return None, None
+            return None, None, None
         
-        #VWAP price volume
 
+        #VWAP price volume
         tpv = symbol_group['volume']*((symbol_group['high'] + symbol_group['low'] + symbol_group['close']) / 3)
         sum_tpv = tpv.shift(1).rolling(window=Z_PERIOD).sum().reset_index(level=0, drop=True)
         sum_v = symbol_group['volume'].shift(1).rolling(window=Z_PERIOD).sum().reset_index(level=0, drop=True)
@@ -171,6 +163,7 @@ class Trader():
         vol_z = (symbol_group['volume'] - symbol_group['volume'].rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / symbol_group['volume'].rolling(Z_PERIOD).std().reset_index(0, drop=True)
         vwap_z = (symbol_group['p_vwap'] - symbol_group['p_vwap'].rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / symbol_group['p_vwap'].rolling(Z_PERIOD).std().reset_index(0, drop=True)
         return_z = (symbol_group['return'] - symbol_group['return'].rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / symbol_group['return'].rolling(Z_PERIOD).std().reset_index(0, drop=True)
+        volatility = symbol_group['return'].rolling(window=Z_PERIOD).std().reset_index(0, drop=True)
         rsi9_norm = (symbol_group['rsi9'] - 50) / 50
         feature_row = pd.DataFrame([{
             "vol_z": vol_z.iloc[-1],
@@ -179,10 +172,10 @@ class Trader():
             "rsi9_norm": rsi9_norm.iloc[-1],
         }])
         feature_row = feature_row.replace([np.inf, -np.inf], np.nan)
-        x_features = pipeline.fit_transform(feature_row)
+        x_features = PIPELINE.fit_transform(feature_row)
         ticker_id = torch.tensor([self.embedding_map[model_symbol]], dtype=torch.int64) # batch size of 1
         features = torch.as_tensor(x_features, dtype=torch.float32).reshape(1, -1) # shape: (1, feature_size)
-        return ticker_id, features
+        return ticker_id, features, volatility.iloc[-1]
     
     async def handle_quote(self, data):
         self.bid_ask_map[data.symbol] = [float(data.bid_price), float(data.ask_price)]
@@ -192,7 +185,7 @@ class Trader():
     async def handle_data(self, data):
         print(f"data received: {data}")
         stream_symbol = data.symbol
-        ticker_id, features = self.process(data)
+        ticker_id, features, volatility = self.process(data)
         if ticker_id is not None and features is not None:
             # print(f"Ticker ID: {ticker_id}, Features: {features}")
             signal = self.signal_generator(ticker_id=ticker_id, features=features)
@@ -200,44 +193,55 @@ class Trader():
             # with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
             #     f.write(f"{data.timestamp}: {symbol} - Signal: {signal}\n")
 
-            order = self.portfolio_management(signal, stream_symbol)
-            if order:
-                try:
-                    self.client.submit_order(order)
-                    print(f"Order submitted: {order}")
-                except Exception as e:
-                    print(f"Error submitting order: {e}")
+            self.portfolio_management(signal, volatility, stream_symbol)
+            
         else:
             # print("Not enough data to generate features and signal yet.")
             pass
 
 
 
-    def portfolio_management(self, signal, symbol):
+    def portfolio_management(self, signal, volatility, symbol):
         base_symbol = self.to_base_symbol(symbol)
         order_symbol = self.to_order_symbol(symbol)
         bid, ask = self.bid_ask_map[symbol]
-        position = None
-        direction = signal[0]-signal[1]
-        buying_power = float(self.account.non_marginable_buying_power)*0.95
-        limit = max(0.005 * buying_power * abs(direction), 10) # per trade limit
-        order = None
         
         if not self.asset_map[base_symbol].tradable:
             print(f"Asset {base_symbol} is not tradable. Cannot place order.")
-            return None
+            return 
         if ask <=0 or bid <=0:
             print(f"need to get quote data for {symbol}")
-            return None
-        try: 
+            return
+        try:
             position = self.client.get_open_position(order_symbol)
-        except Exception as e:
-            print(f"no open position for symbol: {symbol}")
+            available_qty = float(position.qty_available)
+        except APIError as e:
+            position = None
+            available_qty = 0
+        # direction = signal[0]-signal[1]
+        buying_power = float(self.account.non_marginable_buying_power)*0.95
+        # limit = max(0.005 * buying_power * abs(direction), 10) # limit order size
+        limit = max(0.05 * buying_power, 10) # limit order size
+        simple_return = np.exp(signal*volatility)-1
+        print(f"signal: {signal}, volatility: {volatility}, simple_return: {simple_return}, limit: {limit}, buying_power: {buying_power}, available_qty: {available_qty}")
 
-        if signal[0] > 1/3 and direction > 0: # Buy signal (limit order placed slightly above current price)
+        if available_qty > 0 and float(position.unrealized_plpc) > 0.005: # take profit if the unrealized profit exceeds 0.5% of the cost basis
+            print(f"Taking profit on {symbol} with unrealized P/L of {float(position.unrealized_plpc)}% at price {bid}")
+            try:
+                self.client.close_position(order_symbol)
+            except APIError as e:
+                print(f"Error closing position for {symbol}: {e}")
+        elif available_qty > 0 and float(position.unrealized_plpc) < -0.001: # stop loss if the unrealized loss exceeds 0.1% of the cost basis
+            print(f"Stopping loss on {symbol} with unrealized P/L of {float(position.unrealized_plpc)}% at price {bid}")
+            try:
+                self.client.close_position(order_symbol)
+            except APIError as e:
+                print(f"Error closing position for {symbol}: {e}")
+        # elif limit > 0 and signal[0] > 1/3 and direction > 0: # Buy signal (limit order placed slightly above current price)
+        elif limit > 0 and simple_return > 0.005: # Buy signal, greater than 0.5% expected return
             limit_price = ask * (1 + 0.001)
-            quantity =min(int(limit // limit_price), int(buying_power//limit_price)) if not self.asset_map[base_symbol].fractionable else min(limit/limit_price, buying_power/limit_price)
-            if buying_power > limit_price * quantity: #extra
+            quantity = min(int(limit // limit_price), int(buying_power//limit_price)) if not self.asset_map[base_symbol].fractionable else min(limit/limit_price, buying_power/limit_price)
+            if buying_power > limit_price * quantity and quantity > 0: #redundant
                 print(f"Placing limit buy order for {symbol} at limit price {limit_price} with quantity {quantity}")
                 order = LimitOrderRequest(
                     symbol=order_symbol,
@@ -247,38 +251,30 @@ class Trader():
                     time_in_force=TimeInForce.GTC,
                     extended_hours = True
                 )
-        elif position and signal[1] > 1/3 and direction < 0: # Sell signal (market order to sell the entire position to prevent getting stuck with a losing position, since limit orders can fail to execute if the price keeps dropping)
-            order = MarketOrderRequest(
-                symbol=order_symbol,
-                qty=float(position.qty),
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                extended_hours = True
-            )
+                try:
+                    self.client.submit_order(order)
+                    print(f"Order submitted: {order}")
+                except APIError as e:
+                    print(f"Error submitting order: {e}")
+        #no point in selling anyways if the p/l is affected by fees
+        # elif position and signal[1] > 1/3 and direction < 0: # Sell signal (market order to sell the entire position to prevent getting stuck with a losing position, since limit orders can fail to execute if the price keeps dropping)
+        #     limit_price = bid * (1 - 0.001)
+        #     quantity = min(int(limit // limit_price), int(buying_power//limit_price)) if not self.asset_map[base_symbol].fractionable else min(limit/limit_price, buying_power/limit_price)
+        #     quantity = min(quantity, max_sell)
+        #     if buying_power > limit_price * quantity and quantity > 0: #redundant
+        #         print(f"Taking profit on {symbol} with unrealized P/L of {float(position.unrealized_plpc)}% at limit price {limit_price}")
+        #         order = LimitOrderRequest(
+        #             symbol=order_symbol,
+        #             limit_price=limit_price,
+        #             qty=quantity,
+        #             side=OrderSide.SELL,
+        #             time_in_force=TimeInForce.GTC,
+        #             extended_hours = True
+        #         )
         
-        elif position and float(position.unrealized_pl) > 0.004 * float(position.cost_basis): # take profit if the unrealized profit exceeds 40% of the cost basis
-                limit_price = bid * (1 - 0.001)
-                print(f"Taking profit on {symbol} with unrealized P/L of {float(position.unrealized_pl)} at limit price {limit_price}")
-                order = LimitOrderRequest(
-                    symbol=order_symbol,
-                    limit_price=limit_price,
-                    qty=float(position.qty),
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC,
-                    extended_hours = True
-                )
-        elif position and float(position.unrealized_pl) < -0.001 * float(position.cost_basis): # stop loss if the unrealized loss exceeds 1% of the cost basis
-            print(f"Stopping loss on {symbol} with unrealized P/L of {float(position.unrealized_pl)} at market price")
-            order = MarketOrderRequest(
-                symbol=order_symbol,
-                qty=float(position.qty),
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                extended_hours = True
-            )
         else:
             print("Holding")
-        return order
+
         
         # elif signal[1] > 1/3 and direction < 0: # only for short selling, which is currently disabled since not all assets are marginable and it adds extra risk. Sell signal (limit order placed slightly below current price to prevent getting stuck with a losing position)
         #     limit_price = bid * (1 - 0.001)

@@ -7,16 +7,12 @@ from torch.utils.data import TensorDataset, DataLoader, random_split
 from pathlib import Path
 from StockModel import StockModel
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import FunctionTransformer
 import matplotlib.pyplot as plt
 from AppConfig import (
     EPSILON,
     RSI_PERIOD,
     Z_PERIOD,
     DATASET_NAME,
-    X_FEATURE_COLUMNS,
     PATH_TO_DATASETS,
     PATH_TO_MODELS,
     PATH_TO_PRECOMPUTE,
@@ -29,10 +25,14 @@ from AppConfig import (
     TRAIN_MODEL_VERSION,
     TRAIN_MODEL_NAME,
     TRAIN_MODEL_PATH,
+    TRAIN_MODEL_CONFIG,
+    RELOAD,
+    TEST,
+    PIPELINE
 )
 
 # Put in config at some point
-RELOAD = True # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
+
 MODEL_NAME = TRAIN_MODEL_NAME
 MODEL_PATH = TRAIN_MODEL_PATH
 DATASET = PATH_TO_DATASETS/DATASET_NAME
@@ -63,6 +63,14 @@ SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. t
 
 
 class TrainModel:
+    @staticmethod
+    def winsorize(X):
+        # Calculate limits for each column (axis=0)
+        lower = np.percentile(X, 1, axis=0)
+        upper = np.percentile(X, 99, axis=0)
+        # Clip the array to these limits
+        return np.clip(X, lower, upper)
+
     def __init__(self):
         self.x_id_tensor = None
         self.x_tensor = None
@@ -121,6 +129,7 @@ class TrainModel:
             return
         self.dataframe = pd.DataFrame()
         self.dataframe = pd.concat(df_list, ignore_index=True)# basically, since the data is split into multiple files, we read each file and concatenate all the separate dataframes into a single dataframe ignoring their local indexes in the files.
+        self.dataframe.replace([np.inf, -np.inf], np.nan, inplace=True)
         self.dataframe.dropna(inplace=True)
         self.dataframe.sort_values(by=["<TICKER>", "<DATE>", "<TIME>"], inplace=True) #sort it so everything is in order first by ticker, then date, then time
 
@@ -128,23 +137,19 @@ class TrainModel:
             self.dataframe.to_parquet(PARQUET, index=False) #save the concatenated dataframe as a parquet file for faster loading later
         print("load done.")
 
-
+    #eventually we can use separate files that compute each model's features, and just import the correct one based on the model version. This way we can have different features for different models.
     def preprocess_data(self):#does all the feature engineering and label generation. also generates the ticker embeddings and saves the mapping to a json file for later use in the trader. this is where we do all the groupby operations since we need to do them on a per-ticker basis, so we do them all here and then just format tensors later without worrying about groupbys.
         if self.dataframe is None:
             print("no dataframe found")
             return
         print("Preprocessing data...")
+
         self.dataframe['<TICKER>'] = self.dataframe['<TICKER>'].astype('category')
         if not (EMBEDDING_LOOKUP).exists():
             embedding_lookup = dict(enumerate(self.dataframe['<TICKER>'].cat.categories))
             with open(EMBEDDING_LOOKUP, "w") as f:
                 json.dump(embedding_lookup, f)
             print("embedding lookup saved.")
-        
-        pipeline = Pipeline([
-            ('imputer', SimpleImputer(strategy='constant', fill_value=0, keep_empty_features=True)), #for the nan values of the z scores
-            ('squasher', FunctionTransformer(np.tanh)),
-        ])
 
         #VWAP price volume
         g_by = lambda df: df.groupby(self.dataframe['<TICKER>'], sort=False, observed=False)
@@ -163,7 +168,7 @@ class TrainModel:
         self.dataframe['rsi9'] = 100 - (100 / (1 + ma_gain / (ma_loss + EPSILON)))
         
         #return
-        self.dataframe["return"] = np.log((self.dataframe["<CLOSE>"]+EPSILON)/(g["<CLOSE>"].shift(1)+EPSILON)) #interbar momentum, basically the return from the previous close to the current close. this is what we will be trying to predict the direction of, so it's not included in the features.
+        self.dataframe["return"] = np.log((self.dataframe["<CLOSE>"]+EPSILON)/(g["<CLOSE>"].shift(1)+EPSILON)) #interbar momentum, basically the return from the previous close to the current close. 
 
         #final
         self.dataframe['vol_z'] = (self.dataframe['<VOL>'] - g_by(self.dataframe['<VOL>']).rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / g_by(self.dataframe['<VOL>']).rolling(Z_PERIOD).std().reset_index(0, drop=True)
@@ -182,72 +187,76 @@ class TrainModel:
         # self.dataframe['log_volume'] = np.log((self.dataframe['<VOL>'] + 1) / (v_ma + 1))
         # self.dataframe["momentum"] = np.log((self.dataframe["<CLOSE>"]+EPSILON)/(g["<CLOSE>"].shift(1)+EPSILON)) #interbar momentum, basically the return from the previous close to the current close. this is what we will be trying to predict the direction of, so it's not included in the features.
         
-        self.dataframe['future_return'] = g['return'].shift(-1)
-        volatility = g['future_return'].rolling(window=Z_PERIOD).std().reset_index(0, drop=True)
+        self.dataframe['label'] = (g['return_z'].shift(-1))
+        # self.dataframe['future_return'] = g['return'].shift(-1)
+        # # volatility = g['future_return'].rolling(window=Z_PERIOD).std().reset_index(0, drop=True)
         #label generation
-        self.dataframe["label"] = np.select(
-            [self.dataframe['future_return'] > volatility*1.0, self.dataframe['future_return'] < volatility*-1.0],
-            [0, 1],
-            default=2
-        ) #buy / sell / hold, 0, 1, 2
+        # self.dataframe["label"] = np.select(
+        #     [self.dataframe['future_return'] > volatility*1.0, self.dataframe['future_return'] < volatility*-1.0],
+        #     [0, 1],
+        #     default=2
+        # ) #buy / sell / hold, 0, 1, 2
 
+        #redundant cleaning, but just in case
         self.dataframe.replace([np.inf, -np.inf], np.nan, inplace=True)
-        self.dataframe.dropna(subset=['vol_z', 'vwap_z', 'return_z','label'], inplace=True)
-        x_features = pipeline.fit_transform(self.dataframe[['vol_z', 'vwap_z', 'return_z', 'rsi9_norm']])
-        print(x_features)
-        counts = self.dataframe["label"].value_counts().sort_index()
-        print(f"Label distribution:\n{counts}")
-        #accounts for imbalances in data by weighting each output differently (so if there are a bunch of sell signals, it wont just spam sell and get like 100% accuracy but no actual learning)
-        total = counts.sum()
-        raw_weights =[total/counts[i] for i in range(3)]
-        mean_weight = sum(raw_weights) / len(raw_weights)
-        final_weights = [(raw_weights[i]/mean_weight) for i in range(3)]
-        print(final_weights)
-        self.weights_tensor = torch.as_tensor(final_weights, dtype=torch.float32)
-        self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.int64)
+        self.dataframe.dropna(inplace=True)
+        x_features = PIPELINE.fit_transform(self.dataframe[TRAIN_MODEL_CONFIG["features"]])
+        # counts = self.dataframe["label"].value_counts().sort_index()
+        # print(f"Label distribution:\n{counts}")
+        # #accounts for imbalances in data by weighting each output differently (so if there are a bunch of sell signals, it wont just spam sell and get like 100% accuracy but no actual learning)
+        # total = counts.sum()
+        # raw_weights =[total/counts[i] for i in range(3)]
+        # mean_weight = sum(raw_weights) / len(raw_weights)
+        # final_weights = [(raw_weights[i]/mean_weight) for i in range(3)]
+        # print(final_weights)
+        # self.weights_tensor = torch.as_tensor(final_weights, dtype=torch.float32)
+        self.y_tensor = torch.as_tensor(self.dataframe["label"].values, dtype=torch.float32)
         self.x_id_tensor = torch.as_tensor(self.dataframe["ticker_id"].values, dtype=torch.int64)
         self.x_tensor = torch.as_tensor(x_features, dtype=torch.float32)
         torch.save(self.x_tensor, X_TENSOR)
         torch.save(self.x_id_tensor, X_ID_TENSOR)
         torch.save(self.y_tensor, Y_TENSOR)
-        torch.save(self.weights_tensor, WEIGHTS_TENSOR)
+        # torch.save(self.weights_tensor, WEIGHTS_TENSOR)
         print("preprocess done. Tensors saved for future use.")
 
     def load_tensors(self):#loads the preformatted tensors if they exist to save time on subsequent runs. if they don't exist, it will load the data and preprocess it and format the tensors and save them for next time.
-        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists() and Path(WEIGHTS_TENSOR).exists()):
+        # if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists() and Path(WEIGHTS_TENSOR).exists()):
+        if not((X_TENSOR).exists() and Path(Y_TENSOR).exists() and Path(X_ID_TENSOR).exists()):
             print("no saved tensors found")
             return
         self.y_tensor = torch.load(Y_TENSOR)
         self.x_tensor = torch.load(X_TENSOR)
         self.x_id_tensor = torch.load(X_ID_TENSOR)
-        self.weights_tensor = torch.load(WEIGHTS_TENSOR)
+        # self.weights_tensor = torch.load(WEIGHTS_TENSOR)
         print("saved tensors loaded successfully.")
 
 
     def prep_loaders(self):# prepares the data loaders and model for training. it also sets up the loss function and optimizer. we do this in a separate function so that we can easily reload the model and just prepare the loaders without having to reload and preprocess the data again if we want to continue training or evaluate.
-        if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None or self.weights_tensor is None:
+        # if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None or self.weights_tensor is None:
+        if self.x_tensor is None or self.y_tensor is None or self.x_id_tensor is None:
             print("Tensors are not properly initialized. Cannot train model.")
             return
         print("Preparing data loaders and model...")
         
-        embed_size = self.x_id_tensor.max().item() + 1
-        feature_size = len(X_FEATURE_COLUMNS)#number of features/inputs
-        self.model = StockModel(feature_size=feature_size, embed_size=embed_size).to(self.device)
-        def init_weights(m):
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    m.bias.data.fill_(0.01)
-        self.model.apply(init_weights)
-        self.optim_model = torch.compile(self.model, mode="default")
-        self.weights_tensor = self.weights_tensor.to(self.device)
-        self.criterion = nn.CrossEntropyLoss(weight=self.weights_tensor)
 
+        
+        embed_size = self.x_id_tensor.max().item() + 1
+        self.model = StockModel(feature_size=len(TRAIN_MODEL_CONFIG["features"]), embed_size=embed_size, embedding_dims=TRAIN_MODEL_CONFIG["embedding_dims"], output_size=TRAIN_MODEL_CONFIG["output_size"], dropout=TRAIN_MODEL_CONFIG["dropout"], hidden_layers=TRAIN_MODEL_CONFIG["hidden_layers"]).to(self.device)
+        # def init_weights(m):
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
+        #         if m.bias is not None:
+        #             m.bias.data.fill_(0.01)
+        # self.model.apply(init_weights)
+        self.optim_model = torch.compile(self.model, mode="default")
+        # self.weights_tensor = self.weights_tensor.to(self.device)
+        # self.criterion = nn.CrossEntropyLoss(weight=self.weights_tensor)
+        self.criterion = nn.HuberLoss()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3)
         dataset = TensorDataset(self.x_id_tensor, self.x_tensor, self.y_tensor)
         train_size = int(0.8 * len(dataset))
-        test_size = len(dataset) - train_size
-        train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+        train_dataset = torch.utils.data.Subset(dataset, range(0, train_size))
+        test_dataset = torch.utils.data.Subset(dataset, range(train_size, len(dataset)))
         # Set num_workers>0 for better data loading
         self.trainloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=2, persistent_workers=True)
         self.testloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, pin_memory=True, num_workers=4, persistent_workers=True)
@@ -258,39 +267,30 @@ class TrainModel:
             print("Data loaders or model not properly initialized. Cannot train model.")
             return
         print("training model...")
-        train_losses, train_accuracies = [], []
+        train_losses = []
         self.optim_model.train()
         for epoch in range(EPOCHS):
             
-            correct, total, total_loss = 0, 0, 0
+            total_loss = 0
             for x_id_batch, x_batch, y_batch in self.trainloader:
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device,non_blocking=True)
                 y_batch = y_batch.to(self.device,non_blocking=True)
                 self.optimizer.zero_grad(set_to_none=True)
-                outputs = self.optim_model(x_id_batch, x_batch)
+                outputs = self.optim_model(x_id_batch, x_batch).squeeze(1)
                 loss = self.criterion(outputs, y_batch)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 total_loss+=loss.item()
-                total += y_batch.size(0)
-                predicted = torch.argmax(outputs, dim=1)
-                correct += (predicted == y_batch).sum().item()
             epoch_loss = total_loss / len(self.trainloader)
-            epoch_accuracy = correct / total if total else 0.0
             train_losses.append(epoch_loss)
-            train_accuracies.append(epoch_accuracy)
             print(f"loss for epoch {epoch} / {EPOCHS}: {epoch_loss:.4f}")
         torch.save(self.model.state_dict(), MODEL_PATH)
         print("training complete. Model saved.")
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        ax1.plot(train_losses, label="train")
-        ax1.set_title("Loss")
-        ax1.legend()
-        ax2.plot(train_accuracies, label="train")
-        ax2.set_title("Accuracy")
-        ax2.legend()
+        plt.plot(train_losses, label="train")
+        plt.title("Loss")
+        plt.legend()
         plt.tight_layout()
         plt.show()
 
@@ -300,7 +300,7 @@ class TrainModel:
             return
         print("testing model...")
         self.optim_model.eval()
-        correct, total = 0, 0
+        total_loss, total = 0, 0
         all_y_true = []
         all_y_pred = []
         with torch.no_grad():
@@ -308,20 +308,21 @@ class TrainModel:
                 x_id_batch = x_id_batch.to(self.device, non_blocking=True)
                 x_batch = x_batch.to(self.device, non_blocking=True)
                 y_batch = y_batch.to(self.device, non_blocking=True)
-                outputs = self.optim_model(x_id_batch, x_batch) # forward pass
-                
-                predicted = torch.argmax(outputs, dim=1) #predicted class labels
-                all_y_true.extend(y_batch.cpu().detach().numpy().tolist())
-                all_y_pred.extend(predicted.cpu().detach().numpy().tolist())
-                correct += (predicted == y_batch).sum().item() # count correct predictions
-                total += y_batch.size(0) # total number of labels
+                outputs = self.optim_model(x_id_batch, x_batch).squeeze(1)
+                total_loss += self.criterion(outputs, y_batch).item()
+                all_y_true.extend(y_batch.cpu().numpy().tolist())
+                all_y_pred.extend(outputs.cpu().numpy().tolist())
+                total += y_batch.size(0)
         if total == 0:
-            print('No test samples available to evaluate accuracy.')
+            print('No test samples available to evaluate.')
         else:
-            cm = confusion_matrix(all_y_true, all_y_pred, labels=[0, 1, 2])
-            print(f'Accuracy of the model on the test data: {correct} correct predictions out of {total} total samples; {100 * correct / total:.2f}%')  
-            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Buy', 'Sell', 'Hold'])
-            disp.plot()
+            mae = np.mean(np.abs(np.array(all_y_pred) - np.array(all_y_true)))
+            print(f'Test samples: {total} | Huber loss: {total_loss / len(self.testloader):.6f} | MAE: {mae:.6f}')
+            plt.scatter(all_y_true, all_y_pred, alpha=0.1, s=1)
+            plt.xlabel('Actual return')
+            plt.ylabel('Predicted return')
+            plt.title('Predicted vs Actual')
+            plt.tight_layout()
             plt.show()
         
 
@@ -338,8 +339,10 @@ class TrainModel:
 if __name__ == "__main__":
 
     stock_model = TrainModel()
-    stock_model.training_loop()
-    # stock_model.load_model()
+    if TEST:
+        stock_model.load_model()
+    else:
+        stock_model.training_loop()
     stock_model.evaluate()
     
 
