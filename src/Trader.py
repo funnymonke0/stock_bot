@@ -164,6 +164,7 @@ class Trader():
         vwap_z = (symbol_group['p_vwap'] - symbol_group['p_vwap'].rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / symbol_group['p_vwap'].rolling(Z_PERIOD).std().reset_index(0, drop=True)
         return_z = (symbol_group['return'] - symbol_group['return'].rolling(Z_PERIOD).mean().reset_index(0, drop=True)) / symbol_group['return'].rolling(Z_PERIOD).std().reset_index(0, drop=True)
         volatility = symbol_group['return'].rolling(window=Z_PERIOD).std().reset_index(0, drop=True)
+        mean = symbol_group['return'].rolling(window=Z_PERIOD).mean().reset_index(0, drop=True)
         rsi9_norm = (symbol_group['rsi9'] - 50) / 50
         feature_row = pd.DataFrame([{
             "vol_z": vol_z.iloc[-1],
@@ -175,7 +176,7 @@ class Trader():
         x_features = PIPELINE.fit_transform(feature_row)
         ticker_id = torch.tensor([self.embedding_map[model_symbol]], dtype=torch.int64) # batch size of 1
         features = torch.as_tensor(x_features, dtype=torch.float32).reshape(1, -1) # shape: (1, feature_size)
-        return ticker_id, features, volatility.iloc[-1]
+        return ticker_id, features, [volatility.iloc[-1], mean.iloc[-1]]
     
     async def handle_quote(self, data):
         self.bid_ask_map[data.symbol] = [float(data.bid_price), float(data.ask_price)]
@@ -185,7 +186,7 @@ class Trader():
     async def handle_data(self, data):
         print(f"data received: {data}")
         stream_symbol = data.symbol
-        ticker_id, features, volatility = self.process(data)
+        ticker_id, features, stats = self.process(data)
         if ticker_id is not None and features is not None:
             # print(f"Ticker ID: {ticker_id}, Features: {features}")
             signal = self.signal_generator(ticker_id=ticker_id, features=features)
@@ -193,7 +194,7 @@ class Trader():
             # with open(PATH_TO_PRECOMPUTE / "signal_log.txt", "a") as f:
             #     f.write(f"{data.timestamp}: {symbol} - Signal: {signal}\n")
 
-            self.portfolio_management(signal, volatility, stream_symbol)
+            self.portfolio_management(signal, stats, stream_symbol)
             
         else:
             # print("Not enough data to generate features and signal yet.")
@@ -201,7 +202,7 @@ class Trader():
 
 
 
-    def portfolio_management(self, signal, volatility, symbol):
+    def portfolio_management(self, signal, stats, symbol):
         base_symbol = self.to_base_symbol(symbol)
         order_symbol = self.to_order_symbol(symbol)
         bid, ask = self.bid_ask_map[symbol]
@@ -222,8 +223,8 @@ class Trader():
         buying_power = float(self.account.non_marginable_buying_power)*0.95
         # limit = max(0.005 * buying_power * abs(direction), 10) # limit order size
         limit = max(0.05 * buying_power, 10) # limit order size
-        simple_return = np.exp(signal*volatility)-1
-        print(f"signal: {signal}, volatility: {volatility}, simple_return: {simple_return}, limit: {limit}, buying_power: {buying_power}, available_qty: {available_qty}")
+        simple_return = np.exp(signal*stats[0]+stats[1])-1
+        print(f"signal: {signal}, volatility: {stats[0]}, mean: {stats[1]}, simple_return: {simple_return}, limit: {limit}, buying_power: {buying_power}, available_qty: {available_qty}")
 
         if available_qty > 0 and float(position.unrealized_plpc) > 0.005: # take profit if the unrealized profit exceeds 0.5% of the cost basis
             print(f"Taking profit on {symbol} with unrealized P/L of {float(position.unrealized_plpc)}% at price {bid}")
