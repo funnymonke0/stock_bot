@@ -28,7 +28,9 @@ from AppConfig import (
     TRAIN_MODEL_CONFIG,
     RELOAD,
     TEST,
-    PIPELINE
+    PIPELINE,
+    BATCH_SIZE,
+    EPOCHS,
 )
 
 # Put in config at some point
@@ -47,13 +49,12 @@ print(f"Loading from: {DATASET}")
 # SUBDIRS = [r"nysemkt stocks",r"nyse stocks\1", r"nyse stocks\2", r"nasdaq stocks\1", r"nasdaq stocks\2", r"nasdaq stocks\3"]
 
 #hyperparams
-BATCH_SIZE = 512
-EPOCHS = 20
+
 
 # X_FEATURE_COLUMNS = ["norm_open", "norm_high", "norm_low", "log_volume", "momentum"]
 
-BUY_THRESH = 0 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
-SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than 0%, otherwise hold. we realistically should not hold it even for small fluctuations since it can keep building up in a slow decline.
+# BUY_THRESH = 0 #threshold for buy signals, can be tuned as a hyperparameter. this means we only want to buy if the momentum is greater than 0.5%, otherwise hold.
+# SELL_THRESH = 0 #threshold for sell signals, can be tuned as a hyperparameter. this means we only want to sell if the momentum is less than 0%, otherwise hold. we realistically should not hold it even for small fluctuations since it can keep building up in a slow decline.
 
 # time normalization constants
 # OPEN = 9*60 + 30

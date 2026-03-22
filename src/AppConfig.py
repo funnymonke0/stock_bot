@@ -43,6 +43,8 @@ WEIGHTS_TENSOR = PATH_TO_PRECOMPUTE / f"{DATASET_NAME}_weights_tensor.pt"
 SUBDIRS = [r"cryptocurrencies"]
 
 #training specific config
+BATCH_SIZE = 512
+EPOCHS = 20
 TEST = False # Set to True to run a test training loop with a small subset of the data, False to run full training.
 RELOAD = False # Set to True to reload preprocessed tensors if they exist, False to load raw data and preprocess again. 
 
