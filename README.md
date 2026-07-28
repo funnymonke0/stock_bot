@@ -22,6 +22,13 @@ A machine learning model trained on historical market data to trade using paperm
   cd simple-isef-scraper
   pip install -r requirements.txt
 ```
+3. **Try Out**
+```
+  cd src
+  python3 Trader.py #runs the papertrade live trading side
+  python3 TrainModel.py #trains the model on dataset
+```
+
 ## Model
 The core of this bot is a Multi-Layer Perceptron. It is trained on historical features
 * Log Volume (20 bar normalized volume)
