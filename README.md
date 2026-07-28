@@ -37,4 +37,4 @@ The core of this bot is a Multi-Layer Perceptron. It is trained on historical fe
 * I chose to keep these inputs simple normalized ohlcv values, but will update at a later date
 
 ##Results
-* still im progress/unfinished
+* check the results folder. Will add more concrete results to this page at a later date.
